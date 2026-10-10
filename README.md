@@ -18,3 +18,24 @@ firebase.cmd deploy --only firestore:rules --project dicky-ontime-2026
 git push origin main
 ```
 GitHub Pages 使用根目錄 index.html，不需要 Firebase Hosting。
+
+## 睡眠與補登介面
+
+- 「記錄睡眠」先填入睡、起床與選填備註；睡眠計畫可以另外展開。
+- 日期與時間分開選擇。新增睡眠時，起床時間早於入睡時間會帶入隔天；手動修改日期後會保留你的選擇。
+- 起床時間可以留空，之後按「現在起床」或修改紀錄補上。
+- 只有夏令時間結束、同一時間出現兩次時才顯示選擇；修改備註會保留原本的時間與秒數。
+- 出勤與通勤補登共用相同的時間欄位。手機表單支援捲動，睡眠表單的儲存按鈕固定在底部。
+
+## 介面回歸測試
+
+網站仍然直接使用 `index.html`，不需要建置。測試使用獨立的示範資料庫，不會同步到雲端。
+
+```bash
+npm ci
+npx playwright install --with-deps chromium webkit
+npm test
+TEST_BROWSER=webkit npm test
+```
+
+若使用已安裝的 Chromium，可設定 `CHROMIUM_PATH`。測試涵蓋跨日睡眠、午睡、未結束紀錄、日期驗證、夏令時間、舊紀錄保存、出勤與通勤補登，以及 320／390／430 像素手機版排版。

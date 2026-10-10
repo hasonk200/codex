@@ -1,0 +1,10 @@
+{
+  "name": "dicky-ontime",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/recording.test.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.58.2"
+  }
+}
