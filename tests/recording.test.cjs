@@ -289,3 +289,140 @@ test('dialog traps keyboard focus, restores focus and scroll, and supports light
   assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'light');
   await assertNoOverflow(page);
 });
+
+async function journeyRevisions(page) {
+  return page.evaluate(async () => {
+    const scene = new URLSearchParams(location.search).get('scene');
+    const database = (await indexedDB.databases()).find(item => item.name === `dicky-ontime-fixture:${scene}`);
+    const db = await new Promise(resolve => { const request = indexedDB.open(database.name); request.onsuccess = () => resolve(request.result); });
+    const revisions = await new Promise(resolve => { const request = db.transaction('revisions').objectStore('revisions').getAll(); request.onsuccess = () => resolve(request.result); });
+    db.close();
+    return revisions.filter(item => item.entityType === 'journey');
+  });
+}
+
+async function clickAt(page, name, time) {
+  const timestamp = Date.parse(`2026-11-04T${time}:00-05:00`);
+  await page.evaluate(now => { Date.now = () => now; }, timestamp);
+  await page.getByRole('button', { name, exact: true }).click();
+  await page.getByRole('button', { name: '補登／修正紀錄', exact: true }).waitFor();
+}
+
+test('transit: the complete commute records both rides and all seven progress times', async t => {
+  const page = await openPage(t);
+  await page.getByRole('button', { name: '今天', exact: true }).click();
+  await clickAt(page, '出門了', '08:00');
+  await page.getByRole('button', { name: '搭車了（去程）', exact: true }).waitFor();
+  await clickAt(page, '搭車了（去程）', '08:10');
+  await page.getByRole('button', { name: '搭車了（去程）', exact: true }).waitFor({ state: 'hidden' });
+  assert.match(await page.locator('.pill').innerText(), /搭車中/);
+  assert.equal(await page.locator('.hero-caption').innerText(), '你的當地時間');
+  await clickAt(page, '到了！', '08:30');
+  await page.getByRole('button', { name: '到了！', exact: true }).waitFor({ state: 'hidden' });
+  await clickAt(page, '開始上班', '09:00');
+  const dialog = page.getByRole('dialog');
+  await dialog.getByRole('button', { name: '開始上班', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+  await clickAt(page, '收工啦', '17:00');
+  await page.getByRole('button', { name: '收工啦', exact: true }).waitFor({ state: 'hidden' });
+  await clickAt(page, '搭車了（回程）', '17:10');
+  await page.getByRole('button', { name: '搭車了（回程）', exact: true }).waitFor({ state: 'hidden' });
+  assert.match(await page.locator('.pill').innerText(), /搭車回家中/);
+  const worksite = await page.getByRole('button', { name: /^工作地點停留 / }).getAttribute('title');
+  assert.match(worksite, /08:30.*17:10/);
+  await clickAt(page, '到家了', '18:00');
+  await page.getByRole('button', { name: '到家了', exact: true }).waitFor({ state: 'hidden' });
+  assert.deepEqual(await page.locator('.route-label').allTextContents(), ['出門', '搭車（去程）', '抵達', '上班', '下班', '搭車（回程）', '到家']);
+  assert.deepEqual(await page.locator('.route-time').allTextContents(), ['08:00', '08:10', '08:30', '09:00', '17:00', '17:10', '18:00']);
+  const revisions = await journeyRevisions(page);
+  const current = revisions.find(revision => revision.payload.arriveHomeMs !== null);
+  assert.equal(current.payload.boardOutboundMs, Date.parse('2026-11-04T08:10:00-05:00'));
+  assert.equal(current.payload.boardReturnMs, Date.parse('2026-11-04T17:10:00-05:00'));
+  assert.equal(current.payload.leaveDestinationMs, null, 'boarding must not invent an earlier departure time');
+  assert.match(await page.locator('.shift-chips').innerText(), /回程搭車\s*50 分鐘/);
+  await page.reload();
+  await page.getByLabel('今天進度', { exact: true }).waitFor();
+  assert.deepEqual(await page.locator('.route-time').allTextContents(), ['08:00', '08:10', '08:30', '09:00', '17:00', '17:10', '18:00']);
+});
+
+test('transit: walking can skip boarding and keep unrecorded ride times blank', async t => {
+  const page = await openPage(t);
+  await page.getByRole('button', { name: '今天', exact: true }).click();
+  await clickAt(page, '出門了', '08:00');
+  await page.getByRole('button', { name: '到了！', exact: true }).waitFor();
+  await clickAt(page, '到了！', '08:30');
+  await page.getByRole('button', { name: '離開工作地點', exact: true }).waitFor();
+  await clickAt(page, '離開工作地點', '09:00');
+  await page.getByRole('button', { name: '到家了', exact: true }).waitFor();
+  await clickAt(page, '到家了', '09:30');
+  await page.getByRole('button', { name: '到家了', exact: true }).waitFor({ state: 'hidden' });
+  const current = (await journeyRevisions(page)).find(revision => revision.payload.arriveHomeMs !== null);
+  assert.equal(current.payload.boardOutboundMs, null);
+  assert.equal(current.payload.boardReturnMs, null);
+  assert.equal(await page.locator('.route-node.done').count(), 3);
+  assert.equal((await page.locator('.route-time').allTextContents())[1], '—');
+});
+
+test('transit: legacy journeys can record a return ride without rewriting earlier versions', async t => {
+  const page = await openPage(t);
+  await page.goto(`${origin}/?fixture=1&scene=returning`);
+  await page.getByRole('button', { name: '搭車了（回程）', exact: true }).waitFor();
+  const [legacy] = await journeyRevisions(page);
+  assert.equal(legacy.payload.boardOutboundMs, undefined);
+  await clickAt(page, '搭車了（回程）', '17:30');
+  await page.getByRole('button', { name: '搭車了（回程）', exact: true }).waitFor({ state: 'hidden' });
+  const revisions = await journeyRevisions(page);
+  assert.deepEqual(revisions.find(revision => revision.revisionId === legacy.revisionId), legacy);
+  const current = revisions.find(revision => revision.parentIds.includes(legacy.revisionId));
+  assert.equal(current.payload.leaveDestinationMs, legacy.payload.leaveDestinationMs);
+  assert.equal(current.payload.boardReturnMs, Date.parse('2026-11-04T17:30:00-05:00'));
+  await clickAt(page, '到家了', '18:00');
+  await page.getByRole('button', { name: '到家了', exact: true }).waitFor({ state: 'hidden' });
+});
+
+test('transit: backfill validates boarding order and exports both boarding times', async t => {
+  const page = await openPage(t);
+  await page.getByRole('button', { name: '今天', exact: true }).click();
+  await page.getByRole('button', { name: '補登／修正紀錄', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('紀錄種類', { exact: true }).selectOption('journey');
+  for (const [label, time] of [['出門', '08:00'], ['去程搭車', '07:55'], ['抵達', '08:30'], ['回程搭車', '17:15'], ['到家', '18:00']]) {
+    await dialog.getByLabel(`補登${label}時間`, { exact: true }).fill(time);
+  }
+  await page.getByRole('button', { name: '儲存補登', exact: true }).click();
+  assert.match(await dialog.getByRole('alert').innerText(), /去程搭車時間不可早於出門時間/);
+  assert.equal((await journeyRevisions(page)).length, 0);
+  await dialog.getByLabel('補登去程搭車時間', { exact: true }).fill('08:10');
+  await page.getByRole('button', { name: '儲存補登', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: '我的', exact: true }).click();
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: /匯出出行 CSV/ }).click();
+  const stream = await (await downloadPromise).createReadStream();
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const [header, row] = Buffer.concat(chunks).toString().trim().split('\r\n');
+  const columns = header.split(',');
+  const values = row.split(',');
+  assert.equal(values[columns.indexOf('boardOutboundMs')], String(Date.parse('2026-11-04T08:10:00-05:00')));
+  assert.equal(values[columns.indexOf('boardReturnMs')], String(Date.parse('2026-11-04T17:15:00-05:00')));
+});
+
+test('transit: seven steps and both boarding controls fit phones and desktop', async t => {
+  for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 430, height: 932 }, { width: 1280, height: 900 }]) {
+    const page = await openPage(t, viewport);
+    await page.getByRole('button', { name: '今天', exact: true }).click();
+    await clickAt(page, '出門了', '08:00');
+    await page.getByRole('button', { name: '搭車了（去程）', exact: true }).waitFor();
+    await assertNoOverflow(page);
+    const route = await page.getByLabel('今天進度', { exact: true }).boundingBox();
+    assert.ok(route.x >= 0 && route.x + route.width <= viewport.width);
+    await page.getByRole('button', { name: '補登／修正紀錄', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('紀錄種類', { exact: true }).selectOption('journey');
+    assert.ok(await dialog.getByLabel('補登去程搭車時間', { exact: true }).count());
+    assert.ok(await dialog.getByLabel('補登回程搭車時間', { exact: true }).count());
+    await assertNoOverflow(page);
+    await page.close();
+  }
+});
