@@ -230,6 +230,7 @@ async function entityRevisions(page, type) {
   return page.evaluate(async type => {
     const scene = new URLSearchParams(location.search).get('scene');
     const database = (await indexedDB.databases()).find(item => item.name === `dicky-ontime-fixture:${scene}`);
+    if (!database) return [];
     const db = await new Promise(resolve => { const request = indexedDB.open(database.name); request.onsuccess = () => resolve(request.result); });
     const revisions = await new Promise(resolve => { const request = db.transaction('revisions').objectStore('revisions').getAll(); request.onsuccess = () => resolve(request.result); });
     db.close(); return revisions.filter(item => item.entityType === type);
@@ -724,6 +725,7 @@ test('single-event correction of a legacy trip preserves links, notes and prior 
 test('meals during work and outside the preferred window save without changing attendance or pay', async t => {
   const page = await openPage(t);
   await page.goto(`${origin}/?fixture=1&scene=working`);
+  await waitForValue(async () => (await entityRevisions(page, 'session')).length, 1);
   await page.getByRole('button', { name: '用餐安排', exact: true }).click();
   const before = await entityRevisions(page, 'session');
   await page.getByRole('button', { name: '手動新增', exact: true }).click();
@@ -905,10 +907,38 @@ async function waitForPending(page, uid, count) {
   await waitForValue(async () => (await pendingSnapshot(page, uid)).pending.length, count);
 }
 
+// Playwright's Linux WebKit offline switch rejects navigations before service workers.
+// For that engine, interrupt HTTP service and block external requests instead; Chromium
+// exercises the actual browser offline switch, including service-worker fetch failures.
+function installDisconnectControls() {
+  const disconnected = () => sessionStorage.getItem('ontime-test-disconnected') === '1';
+  Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => !disconnected() });
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (input, options) => {
+    const url = new URL(input instanceof Request ? input.url : input, location.href);
+    if (disconnected() && url.origin !== location.origin) return Promise.reject(new TypeError('Test network unavailable'));
+    return originalFetch(input, options);
+  };
+}
+async function setDisconnected(page, uid, disconnected) {
+  if (engine !== 'webkit') { await page.context().setOffline(disconnected); return; }
+  if (disconnected) {
+    harness.disconnected.add(uid);
+    page.context().once('close', () => harness.disconnected.delete(uid));
+    await page.context().route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await page.context().addInitScript(installDisconnectControls);
+    await page.evaluate(installDisconnectControls);
+  } else { harness.disconnected.delete(uid); await page.context().unrouteAll({ behavior: 'wait' }); }
+  await page.evaluate(value => {
+    sessionStorage.setItem('ontime-test-disconnected', value ? '1' : '0');
+    window.dispatchEvent(new Event(value ? 'offline' : 'online'));
+  }, disconnected);
+}
+
 test('offline saves survive reopening and upload automatically on reconnect without duplicate cloud revisions', async t => {
   const { page, uid } = await openSyncPage(t);
   assert.ok([...harness.cloud(uid).values()].some(item => item.entityType === 'job'));
-  await page.context().setOffline(true);
+  await setDisconnected(page, uid, true);
   await page.waitForFunction(() => !navigator.onLine);
   const dialog = await openManualMeal(page, '12:00', '12:20', 'lunch');
   await dialog.getByText('餐點、地點與備註（選填）', { exact: true }).click();
@@ -925,7 +955,7 @@ test('offline saves survive reopening and upload automatically on reconnect with
   await page.getByRole('button', { name: '用餐安排', exact: true }).click();
   await page.getByText('離線午餐', { exact: true }).waitFor();
   assert.equal((await pendingSnapshot(page, uid)).pending.length, 1);
-  await page.context().setOffline(false);
+  await setDisconnected(page, uid, false);
   await waitForPending(page, uid, 0);
   const cloudMeal = harness.cloud(uid).get(saved.revisionId);
   assert.equal(cloudMeal.payload.food, '離線午餐');
@@ -990,7 +1020,7 @@ test('the real Firebase auth client restores a cached login while fully offline 
     }); db.close();
   }, uid);
   // The production Auth client runs here; network stays disabled for this whole scenario.
-  await page.context().setOffline(true);
+  await setDisconnected(page, uid, true);
   await page.goto(`${origin}/?cached_auth_test=${uid}`);
   await page.getByRole('button', { name: '班表', exact: true }).click();
   await page.getByText('cached-work', { exact: true }).first().waitFor();
@@ -1013,4 +1043,17 @@ test('unknown commute estimates do not turn the whole shift into a blocked meal 
   assert.equal(result.commute.length, 0);
   assert.ok(result.lunch);
   assert.equal(result.lunch.reason, '上班期間用餐');
+});
+
+
+test('cached auth initializes without a login iframe and Google sign-in still supplies its popup resolver', async t => {
+  const page = await openPage(t);
+  const result = await page.evaluate(async () => {
+    const auth = __ontimeTest.authClient();
+    await auth._initializationPromise;
+    const lazy = !auth._popupRedirectResolver;
+    return { lazy, popup: await __ontimeTest.testGooglePopup() };
+  });
+  assert.equal(result.lazy, true);
+  assert.deepEqual(result.popup, { resolver: true, provider: 'google.com', auth: true });
 });

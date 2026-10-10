@@ -1,12 +1,16 @@
 // Only the local test server instruments the bundle. Production HTML has no test hooks.
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
-const clouds = new Map(), failUploads = new Set();
+const clouds = new Map(), failUploads = new Set(), disconnected = new Set();
 let workerVariant = 'v1';
 function cloud(uid) { if (!clouds.has(uid)) clouds.set(uid, new Map()); return clouds.get(uid); }
 function instrument(html) {
   const hooks = `
-    globalThis.__ontimeTest = { Repository: Bv, budget: bp, mealInput: Ip, suggestMeals: Lk, authPersistenceKey: () => "firebase:authUser:" + bs.VITE_FIREBASE_API_KEY + ":[DEFAULT]" };
+    globalThis.__ontimeTest = { Repository: Bv, budget: bp, mealInput: Ip, suggestMeals: Lk, authClient: () => cc()?.auth, testGooglePopup: async () => {
+      const original = _j; let args;
+      try { _j = async (...value) => { args = value; return { user: { uid: 'popup-regression' } }; }; await SL(); return { resolver: args[2] === iO, provider: args[1].providerId, auth: args[0] === cc()?.auth }; }
+      finally { _j = original; }
+    }, authPersistenceKey: () => "firebase:authUser:" + bs.VITE_FIREBASE_API_KEY + ":[DEFAULT]" };
     const testUid = new URLSearchParams(location.search).get('sync_test');
     if (testUid) {
       const user = { uid: testUid, displayName: 'Offline Regression', email: 'offline@example.test' };
@@ -25,6 +29,9 @@ function instrument(html) {
 }
 async function handle(request, response, root) {
   const url = new URL(request.url, 'http://localhost');
+  if (disconnected.size) {
+    response.writeHead(503); response.end('Test network unavailable'); return true;
+  }
   if (url.pathname === '/sw.js') {
     const script = readFileSync(join(root, 'sw.js'), 'utf8').replace('${prefix}v1', '${prefix}' + workerVariant);
     response.writeHead(200, { 'Content-Type': 'application/javascript', 'Cache-Control': 'no-store' }); response.end(script); return true;
@@ -44,4 +51,4 @@ async function handle(request, response, root) {
   else { response.writeHead(404); response.end('{}'); }
   return true;
 }
-module.exports = { instrument, handle, cloud, failUploads, setWorkerVariant: value => { workerVariant = value; } };
+module.exports = { instrument, handle, cloud, failUploads, disconnected, setWorkerVariant: value => { workerVariant = value; } };
