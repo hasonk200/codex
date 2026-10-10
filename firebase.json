@@ -1,0 +1,17 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "auth": {
+    "providers": {
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "DICKY ONTIME",
+        "supportEmail": "dickymanho@gmail.com",
+        "authorizedRedirectUris": [
+          "https://hasonk200.github.io",
+          "https://hasonk200.github.io/codex/"
+        ]
+      }
+    }
+  }
+}

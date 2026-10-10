@@ -1,13 +1,20 @@
 # DICKY / ONTIME
 
-Dicky 的個人班表與時間安排工具。
+個人班表、出勤、通勤、用餐、睡眠及時間預算工具。
 
-下載 index.html，用瀏覽器直接開啟，不需要 Node.js 或本機伺服器。
+[開啟網頁](https://hasonk200.github.io/codex/)
 
-資料保存在目前瀏覽器的本機資料庫；不同瀏覽器或網址不會自動共用資料。請使用 App 的 JSON 備份功能保存資料。
+## Firebase Sync
+- 使用 Google 帳戶登入後，個人資料會透過 Firestore 同步到同一帳戶的其他裝置。
+- Firestore 安全規則限定登入者只能讀寫自己 UID 下的資料；雲端紀錄採用不可覆寫的 revisions。
+- 既有本機資料會保留；請在首次登入前先從 App 匯出 JSON 備份。
+- 離線時仍可使用本機資料，重新連線再同步。
+- Firebase 專案：dicky-ontime-2026。
+- 首次使用前，必須在 Firebase Console 啟用 Authentication → Google 登入，並設定授權網域；同時建立 Firestore database 並部署 firestore.rules。
 
-包含班表、出勤、通勤、用餐、預計／實際睡眠及時間預算。正式 Firebase 雲端同步尚未設定；單檔版本沒有 PWA 安裝與 Service Worker。
-
-正式使用不要加上 fixture 示範參數。此 HTML 不包含使用者瀏覽器中的私人紀錄。
-
-SHA-256: 7723C1775E9F0D4903678B8C730DAF50920BA7396417C788BCBB59131F06DCB0
+## 部署
+```powershell
+firebase.cmd deploy --only firestore:rules --project dicky-ontime-2026
+git push origin main
+```
+GitHub Pages 使用根目錄 index.html，不需要 Firebase Hosting。
