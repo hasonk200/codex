@@ -2,7 +2,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { createServer } = require('node:http');
 const { readFileSync, existsSync } = require('node:fs');
-const { join } = require('node:path');
+const { join, resolve, extname, sep } = require('node:path');
 const { chromium, webkit } = require('playwright');
 
 let server, browser, origin;
@@ -11,6 +11,16 @@ const engine = process.env.TEST_BROWSER || 'chromium';
 
 before(async () => {
   server = createServer((request, response) => {
+    const root = resolve(__dirname, '..');
+    const pathname = new URL(request.url, 'http://localhost').pathname;
+    if (pathname.startsWith('/assets/')) {
+      const path = resolve(root, `.${pathname}`);
+      if (!path.startsWith(`${root}${sep}assets${sep}`) || !existsSync(path)) {
+        response.writeHead(404); response.end(); return;
+      }
+      response.writeHead(200, { 'Content-Type': extname(path) === '.woff2' ? 'font/woff2' : 'text/css; charset=utf-8' });
+      response.end(readFileSync(path)); return;
+    }
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     response.end(html);
   });
@@ -425,4 +435,87 @@ test('transit: seven steps and both boarding controls fit phones and desktop', a
     await assertNoOverflow(page);
     await page.close();
   }
+});
+
+test('design: every page fits narrow phones and desktop in dark and light themes', async t => {
+  const tabs = ['今天', '班表', '用餐安排', '我的時間', '統計', '我的'];
+  for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 430, height: 932 }, { width: 1280, height: 900 }]) {
+    const page = await openPage(t, viewport);
+    const assetFailures = [];
+    page.on('response', response => { if (response.url().includes('/assets/') && !response.ok()) assetFailures.push(response.url()); });
+    for (const theme of ['dark', 'light']) {
+      if (theme === 'light') {
+        await page.getByRole('button', { name: '我的', exact: true }).click();
+        await page.getByLabel('主題', { exact: true }).selectOption('light');
+        await page.getByRole('button', { name: '儲存設定', exact: true }).click();
+        await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+      }
+      for (const tab of tabs) {
+        await page.getByRole('button', { name: tab, exact: true }).click();
+        await page.evaluate(() => document.fonts.ready);
+        await assertNoOverflow(page);
+        const typography = await page.evaluate(() => ({
+          family: getComputedStyle(document.body).fontFamily,
+          chinese: document.fonts.check('500 15px "Noto Sans TC"', '班表睡眠搭車'),
+          latin: document.fonts.check('600 24px "Inter"', 'ONTIME 09:30'),
+          failed: [...document.fonts].filter(font => font.status === 'error').length
+        }));
+        assert.match(typography.family, /Inter.*Noto Sans TC/);
+        assert.ok(typography.chinese && typography.latin, JSON.stringify(typography));
+        assert.equal(typography.failed, 0);
+      }
+    }
+    assert.deepEqual(assetFailures, []);
+    await page.close();
+  }
+});
+
+test('design: schedule views and the month chart remain usable on a small phone', async t => {
+  const page = await openPage(t, { width: 320, height: 568 });
+  await page.getByRole('button', { name: '班表', exact: true }).click();
+  for (const view of ['月曆', '週時間軸', '清單']) {
+    await page.getByRole('button', { name: view, exact: true }).click();
+    await assertNoOverflow(page);
+  }
+  await page.getByRole('button', { name: '統計', exact: true }).click();
+  await page.getByRole('button', { name: '本月', exact: true }).click();
+  await assertNoOverflow(page);
+  const chart = await page.locator('.stats-chart').evaluate(element => ({
+    client: element.clientWidth, scroll: element.scrollWidth,
+    rowPositions: [...element.children].map(day => day.getBoundingClientRect().bottom)
+  }));
+  assert.ok(chart.scroll > chart.client, 'month chart should scroll within its card');
+  assert.ok(chart.rowPositions.every(bottom => Math.abs(bottom - chart.rowPositions[0]) < 1), 'days must stay in one horizontal row');
+});
+
+test('design: accent choices affect controls and text keeps readable contrast in both themes', async t => {
+  const page = await openPage(t);
+  await page.getByRole('button', { name: '我的', exact: true }).click();
+  const backgrounds = new Set();
+  for (const theme of ['dark', 'light']) {
+    for (const accent of ['lime', 'ice', 'amber']) {
+      await page.getByLabel('主題', { exact: true }).selectOption(theme);
+      await page.getByLabel('主色', { exact: true }).selectOption(accent);
+      const save = page.getByRole('button', { name: '儲存設定', exact: true });
+      if (await save.count()) await save.click();
+      await page.waitForFunction(({ theme, accent }) => document.documentElement.dataset.theme === theme && document.documentElement.dataset.accent === accent, { theme, accent });
+      const colors = await page.evaluate(() => {
+        const style = getComputedStyle(document.documentElement);
+        const luminance = token => {
+          const value = style.getPropertyValue(token).trim().slice(1);
+          const rgb = [0, 2, 4].map(offset => parseInt(value.slice(offset, offset + 2), 16) / 255)
+            .map(channel => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4);
+          return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722;
+        };
+        const panel = luminance('--panel');
+        return { sun: style.getPropertyValue('--sun').trim(), contrast: ['--text', '--dim', '--faint', '--accent-ink'].map(token => {
+          const foreground = luminance(token);
+          return (Math.max(foreground, panel) + .05) / (Math.min(foreground, panel) + .05);
+        }) };
+      });
+      backgrounds.add(colors.sun);
+      assert.ok(colors.contrast.every(ratio => ratio >= 4.5), JSON.stringify({ theme, accent, colors }));
+    }
+  }
+  assert.equal(backgrounds.size, 3);
 });
