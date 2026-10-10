@@ -4,14 +4,17 @@ const { createServer } = require('node:http');
 const { readFileSync, existsSync } = require('node:fs');
 const { join, resolve, extname, sep } = require('node:path');
 const { chromium, webkit } = require('playwright');
+const harness = require('./app-harness.cjs');
+const { randomUUID } = require('node:crypto');
 
 let server, browser, origin;
-const html = readFileSync(join(__dirname, '../index.html'));
+const html = harness.instrument(readFileSync(join(__dirname, '../index.html'), 'utf8'));
 const engine = process.env.TEST_BROWSER || 'chromium';
 
 before(async () => {
-  server = createServer((request, response) => {
+  server = createServer(async (request, response) => {
     const root = resolve(__dirname, '..');
+    if (await harness.handle(request, response, root)) return;
     const pathname = new URL(request.url, 'http://localhost').pathname;
     if (pathname.startsWith('/assets/')) {
       const path = resolve(root, `.${pathname}`);
@@ -718,26 +721,37 @@ test('single-event correction of a legacy trip preserves links, notes and prior 
   assert.equal(updated.payload.boardReturnMs, Date.parse('2026-11-04T17:30:00-05:00'));
 });
 
-test('simpler meal forms still block work conflicts and require acceptance outside the meal window', async t => {
+test('meals during work and outside the preferred window save without changing attendance or pay', async t => {
   const page = await openPage(t);
+  await page.goto(`${origin}/?fixture=1&scene=working`);
   await page.getByRole('button', { name: '用餐安排', exact: true }).click();
+  const before = await entityRevisions(page, 'session');
   await page.getByRole('button', { name: '手動新增', exact: true }).click();
-  const dialog = page.getByRole('dialog'), save = dialog.getByRole('button', { name: '確認並加入時間軸', exact: true });
-  await dialog.getByLabel('用餐開始時間', { exact: true }).fill('09:30');
-  await dialog.getByLabel('用餐結束時間', { exact: true }).fill('09:45');
-  await save.click();
-  assert.match(await dialog.getByRole('alert').innerText(), /時間衝突/);
-  assert.equal((await entityRevisions(page, 'meal')).length, 0);
-  await dialog.getByLabel('用餐開始時間', { exact: true }).fill('18:00');
-  await dialog.getByLabel('用餐結束時間', { exact: true }).fill('18:20');
+  const dialog = page.getByRole('dialog');
   await dialog.getByLabel('餐別', { exact: true }).selectOption('lunch');
-  await save.click();
-  assert.match(await dialog.getByRole('alert').innerText(), /超出偏好時段/);
-  await dialog.getByLabel('接受這餐超出偏好時段', { exact: true }).check();
-  await save.click(); await dialog.waitFor({ state: 'hidden' });
-  const [meal] = await entityRevisions(page, 'meal');
-  assert.equal(meal.payload.outsidePreferenceAccepted, true);
-  assert.equal(meal.payload.kind, 'lunch');
+  await dialog.getByLabel('用餐開始時間', { exact: true }).fill('10:00');
+  await dialog.getByLabel('用餐結束時間', { exact: true }).fill('10:20');
+  assert.equal(await dialog.getByLabel('接受這餐超出偏好時段', { exact: true }).count(), 0);
+  await dialog.getByText('餐點、地點與備註（選填）', { exact: true }).click();
+  await dialog.getByLabel('吃什麼', { exact: true }).fill('上班午餐');
+  await dialog.getByLabel('地點', { exact: true }).fill('工作地點');
+  await dialog.getByRole('button', { name: '確認並加入時間軸', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+  const [saved] = (await entityRevisions(page, 'meal')).filter(item => item.payload.food === '上班午餐');
+  assert.equal(saved.payload.kind, 'lunch');
+  assert.equal(saved.payload.outsidePreferenceAccepted, true);
+  assert.deepEqual(await entityRevisions(page, 'session'), before);
+  assert.equal(await page.getByText(/班表／通勤變更影響到這餐/).count(), 0);
+  const budget = await page.evaluate(async () => {
+    const repo = new __ontimeTest.Repository('fixture:working', { localOnly: true });
+    const { data } = await repo.loadAppData();
+    const meal = data.meals.find(item => item.food === '上班午餐');
+    const withMeal = __ontimeTest.budget(data, '2026-11-04', { nowMs: Date.now() });
+    const withoutMeal = __ontimeTest.budget({ ...data, meals: data.meals.filter(item => item.id !== meal.id) }, '2026-11-04', { nowMs: Date.now() });
+    await repo.close(); return { withMeal, withoutMeal };
+  });
+  assert.equal(budget.withMeal.workOccupiedMs, budget.withoutMeal.workOccupiedMs);
+  assert.equal(budget.withMeal.unplannedMs, budget.withoutMeal.unplannedMs, 'eating during work must not subtract that time twice');
 });
 
 test('template forms keep optional breaks collapsed and store overnight schedules without inventing lunch', async t => {
@@ -767,4 +781,236 @@ test('single-event date edits retain the time already entered and persist it on 
   await saveBackfill(page);
   const [trip] = await journeyRevisions(page);
   assert.equal(trip.payload.leaveHomeMs, Date.parse('2026-11-03T08:00:00-05:00'));
+});
+
+async function openManualMeal(page, start, end, kind = 'snack') {
+  await page.getByRole('button', { name: '用餐安排', exact: true }).click();
+  await page.getByRole('button', { name: '手動新增', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('餐別', { exact: true }).selectOption(kind);
+  await dialog.getByLabel('用餐開始時間', { exact: true }).fill(start);
+  await dialog.getByLabel('用餐結束時間', { exact: true }).fill(end);
+  return dialog;
+}
+async function saveMeal(page) {
+  await page.getByRole('dialog').getByRole('button', { name: '確認並加入時間軸', exact: true }).click();
+  await page.getByRole('dialog').waitFor({ state: 'hidden' });
+}
+
+test('meals in actual transit save and editing them keeps food and notes', async t => {
+  const page = await openPage(t);
+  await page.getByRole('button', { name: '今天', exact: true }).click();
+  await clickAt(page, '出門了', '08:00');
+  await page.getByRole('button', { name: '到了！', exact: true }).waitFor();
+  await clickAt(page, '到了！', '08:30');
+  await page.getByRole('button', { name: '到了！', exact: true }).waitFor({ state: 'hidden' });
+  const originalTrip = await journeyRevisions(page);
+  const dialog = await openManualMeal(page, '08:10', '08:20', 'breakfast');
+  await dialog.getByText('餐點、地點與備註（選填）', { exact: true }).click();
+  await dialog.getByLabel('吃什麼', { exact: true }).fill('搭車早餐');
+  await dialog.getByLabel('備註', { exact: true }).fill('在車上吃');
+  await saveMeal(page);
+  const [meal] = await entityRevisions(page, 'meal');
+  await page.getByText('搭車早餐', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '編輯', exact: true }).click();
+  await page.getByRole('dialog').getByLabel('用餐結束時間', { exact: true }).fill('08:25');
+  await page.getByRole('dialog').getByRole('button', { name: '儲存變更', exact: true }).click();
+  await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  const updated = (await entityRevisions(page, 'meal')).find(item => item.parentIds.includes(meal.revisionId));
+  assert.equal(updated.payload.food, '搭車早餐'); assert.equal(updated.payload.note, '在車上吃');
+  assert.deepEqual(await journeyRevisions(page), originalTrip);
+});
+
+test('meal suggestions include lunch during a shift and both individual and bulk confirmation work', async t => {
+  const page = await openPage(t);
+  await page.getByRole('button', { name: '用餐安排', exact: true }).click();
+  await page.getByRole('button', { name: '產生建議', exact: true }).first().click();
+  const draftCard = page.locator('.card').filter({ has: page.getByRole('heading', { name: '建議草稿', exact: true }) });
+  const lunch = draftCard.locator('.list-item').filter({ hasText: '午餐' });
+  await lunch.waitFor();
+  assert.match(await lunch.innerText(), /12:00/);
+  await lunch.locator('.row-actions .button.primary').click();
+  await lunch.waitFor({ state: 'hidden' });
+  assert.ok((await entityRevisions(page, 'meal')).some(item => item.payload.kind === 'lunch'));
+  await draftCard.getByRole('button', { name: '確認可行全部', exact: true }).click();
+  await draftCard.getByText('等待安排', { exact: true }).waitFor();
+  assert.ok((await entityRevisions(page, 'meal')).some(item => item.payload.kind === 'dinner'));
+});
+
+test('meal suggestions prefer a real break without subtracting another job from the work interval', async t => {
+  const page = await openPage(t);
+  const result = await page.evaluate(() => {
+    const at = time => Date.parse(`2026-11-04T${time}:00-05:00`);
+    const input = { date: '2026-11-04', timeZone: 'America/Toronto', nowMs: at('11:00'),
+      preferences: [{ kind: 'lunch', enabled: true, windowStart: '12:00', windowEnd: '14:00', preferredStart: '12:00', durationMinutes: 30 }],
+      workingIntervals: [{ startMs: at('09:00'), endMs: at('12:30') }, { startMs: at('13:00'), endMs: at('17:00') }],
+      restIntervals: [{ startMs: at('12:30'), endMs: at('13:00') }], commuteIntervals: [], worksiteStayIntervals: [], confirmedMeals: [] };
+    const withBreak = __ontimeTest.suggestMeals(input).suggestions[0];
+    const secondJob = __ontimeTest.suggestMeals({ ...input, workingIntervals: [{ startMs: at('09:00'), endMs: at('17:00') }] }).suggestions[0];
+    return { withBreak, secondJob, expectedBreak: at('12:30'), expectedPreferred: at('12:00') };
+  });
+  assert.equal(result.withBreak.startMs, result.expectedBreak);
+  assert.equal(result.secondJob.startMs, result.expectedPreferred);
+  assert.equal(result.secondJob.reason, '上班期間用餐');
+});
+
+test('duplicate meals and invalid duration still show a readable error', async t => {
+  const page = await openPage(t);
+  await openManualMeal(page, '13:00', '13:20'); await saveMeal(page);
+  const dialog = await openManualMeal(page, '13:10', '13:30');
+  const save = dialog.getByRole('button', { name: '確認並加入時間軸', exact: true });
+  await save.click(); assert.match(await dialog.getByRole('alert').innerText(), /與其他餐次重疊/);
+  await dialog.getByLabel('用餐開始時間', { exact: true }).fill('14:00');
+  await dialog.getByLabel('用餐結束日期', { exact: true }).fill('2026-11-04');
+  await dialog.getByLabel('用餐結束時間', { exact: true }).fill('13:50');
+  await save.click(); assert.match(await dialog.getByRole('alert').innerText(), /結束必須晚於/);
+  assert.equal((await entityRevisions(page, 'meal')).length, 1);
+});
+
+async function openSyncPage(t) {
+  const uid = `regression-${randomUUID()}`;
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: 'zh-TW' });
+  t.after(() => context.close());
+  const page = await context.newPage(), errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  t.after(() => assert.deepEqual(errors, []));
+  await page.goto(`${origin}/?sync_test=${uid}`);
+  await waitForValue(() => page.evaluate(async uid => (await indexedDB.databases()).some(database => database.name === `dicky-ontime-${uid}`), uid), true);
+  await page.getByRole('button', { name: '班表', exact: true }).click();
+  await page.getByRole('button', { name: '新增工作', exact: true }).click();
+  await page.getByRole('dialog').getByLabel('工作名稱', { exact: true }).fill('離線測試工作');
+  await page.getByRole('dialog').getByRole('button', { name: '儲存工作', exact: true }).click();
+  await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  await waitForPending(page, uid, 0);
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+  return { page, uid };
+}
+async function pendingSnapshot(page, uid) {
+  return page.evaluate(async uid => {
+    const repository = new __ontimeTest.Repository(uid);
+    const result = { pending: await repository.getAllOutbox(), data: (await repository.loadAppData()).data, revisions: await repository.getAllRevisions() };
+    await repository.close(); return result;
+  }, uid);
+}
+async function waitForValue(read, expected, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const value = await read();
+    if (value === expected) return;
+    assert.ok(Date.now() < deadline, `Timed out waiting for ${expected}; last value: ${value}`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
+async function waitForPending(page, uid, count) {
+  await waitForValue(async () => (await pendingSnapshot(page, uid)).pending.length, count);
+}
+
+test('offline saves survive reopening and upload automatically on reconnect without duplicate cloud revisions', async t => {
+  const { page, uid } = await openSyncPage(t);
+  assert.ok([...harness.cloud(uid).values()].some(item => item.entityType === 'job'));
+  await page.context().setOffline(true);
+  await page.waitForFunction(() => !navigator.onLine);
+  const dialog = await openManualMeal(page, '12:00', '12:20', 'lunch');
+  await dialog.getByText('餐點、地點與備註（選填）', { exact: true }).click();
+  await dialog.getByLabel('吃什麼', { exact: true }).fill('離線午餐');
+  await dialog.getByLabel('備註', { exact: true }).fill('斷網時記錄');
+  await saveMeal(page);
+  await page.getByText('已存到手機，恢復網絡後會自動同步。', { exact: true }).waitFor();
+  const stored = await pendingSnapshot(page, uid);
+  assert.equal(stored.pending.length, 1);
+  const saved = stored.pending[0];
+  assert.equal(saved.payload.food, '離線午餐');
+  assert.equal(harness.cloud(uid).has(saved.revisionId), false);
+  await page.reload();
+  await page.getByRole('button', { name: '用餐安排', exact: true }).click();
+  await page.getByText('離線午餐', { exact: true }).waitFor();
+  assert.equal((await pendingSnapshot(page, uid)).pending.length, 1);
+  await page.context().setOffline(false);
+  await waitForPending(page, uid, 0);
+  const cloudMeal = harness.cloud(uid).get(saved.revisionId);
+  assert.equal(cloudMeal.payload.food, '離線午餐');
+  assert.equal(cloudMeal.payload.note, '斷網時記錄');
+  assert.equal([...harness.cloud(uid).values()].filter(item => item.entityType === 'meal').length, 1);
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await waitForPending(page, uid, 0);
+  assert.equal([...harness.cloud(uid).values()].filter(item => item.entityType === 'meal').length, 1);
+});
+
+test('a failed cloud upload keeps the local revision and retries automatically', async t => {
+  const { page, uid } = await openSyncPage(t);
+  harness.failUploads.add(uid);
+  await openManualMeal(page, '13:00', '13:20'); await saveMeal(page);
+  await waitForValue(async () => (await pendingSnapshot(page, uid)).pending.some(item => item.attempts > 0), true);
+  const pending = await pendingSnapshot(page, uid);
+  assert.equal(pending.data.meals.length, 1);
+  assert.equal(pending.pending.length, 1);
+  const revision = pending.revisions.find(item => item.entityType === 'meal');
+  await waitForPending(page, uid, 0);
+  assert.deepEqual(harness.cloud(uid).get(revision.revisionId), revision);
+  assert.equal([...harness.cloud(uid).values()].filter(item => item.entityType === 'meal').length, 1);
+});
+
+test('an app update waits while the user is editing a meal and does not discard the draft', async t => {
+  const page = await openPage(t);
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+  const dialog = await openManualMeal(page, '12:00', '12:20');
+  await dialog.getByText('餐點、地點與備註（選填）', { exact: true }).click();
+  await dialog.getByLabel('吃什麼', { exact: true }).fill('尚未儲存的午餐');
+  harness.setWorkerVariant('update-test'); t.after(() => harness.setWorkerVariant('v1'));
+  await page.evaluate(async () => { const worker = await navigator.serviceWorker.getRegistration(); await worker.update(); });
+  const update = page.getByRole('button', { name: /編輯完成後更新/ });
+  await update.waitFor(); assert.ok(await update.isDisabled());
+  assert.equal(await dialog.getByLabel('吃什麼', { exact: true }).inputValue(), '尚未儲存的午餐');
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  assert.ok(await page.getByRole('button', { name: '更新', exact: true }).isEnabled());
+});
+
+test('the real Firebase auth client restores a cached login while fully offline and can save locally', async t => {
+  const page = await openPage(t), uid = `cached-auth-${randomUUID()}`;
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+  await page.evaluate(async uid => {
+    const fixture = new __ontimeTest.Repository('fixture:planning', { localOnly: true });
+    const { data } = await fixture.loadAppData(); await fixture.close();
+    const repository = new __ontimeTest.Repository(uid);
+    await repository.saveEntityRevision({ entityType: 'job', entityId: data.jobs[0].id, payload: { ...data.jobs[0], name: 'cached-work' }, baseParentIds: [] });
+    await repository.close();
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('firebaseLocalStorageDb', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('firebaseLocalStorage', { keyPath: 'fbase_key' });
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction('firebaseLocalStorage', 'readwrite');
+      transaction.objectStore('firebaseLocalStorage').put({ fbase_key: __ontimeTest.authPersistenceKey(), value: {
+        uid, email: 'offline@example.test', emailVerified: true, displayName: 'Cached Offline Regression', isAnonymous: false,
+        providerData: [], stsTokenManager: { refreshToken: 'regression-only', accessToken: 'regression-only', expirationTime: Date.now() + 3600000 },
+        apiKey: __ontimeTest.authPersistenceKey().split(':')[2], appName: '[DEFAULT]', createdAt: String(Date.now()), lastLoginAt: String(Date.now())
+      } });
+      transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error);
+    }); db.close();
+  }, uid);
+  // The production Auth client runs here; network stays disabled for this whole scenario.
+  await page.context().setOffline(true);
+  await page.goto(`${origin}/?cached_auth_test=${uid}`);
+  await page.getByRole('button', { name: '班表', exact: true }).click();
+  await page.getByText('cached-work', { exact: true }).first().waitFor();
+  await openManualMeal(page, '12:00', '12:20', 'lunch'); await saveMeal(page);
+  const saved = await pendingSnapshot(page, uid);
+  assert.equal(saved.pending.length, 2);
+  assert.equal(saved.data.meals.length, 1);
+  assert.equal(harness.cloud(uid).size, 0);
+});
+
+test('unknown commute estimates do not turn the whole shift into a blocked meal window', async t => {
+  const page = await openPage(t);
+  const result = await page.evaluate(async () => {
+    const repository = new __ontimeTest.Repository('fixture:planning', { localOnly: true });
+    const { data } = await repository.loadAppData(); await repository.close();
+    data.shifts = data.shifts.map(shift => ({ ...shift, plannedBreaks: [], commuteSnapshot: { ...shift.commuteSnapshot, outMinutes: null, backMinutes: null, noCommute: false } }));
+    const input = __ontimeTest.mealInput(data, '2026-11-04', Date.now());
+    return { commute: input.commuteIntervals, lunch: __ontimeTest.suggestMeals(input).suggestions.find(meal => meal.kind === 'lunch') };
+  });
+  assert.equal(result.commute.length, 0);
+  assert.ok(result.lunch);
+  assert.equal(result.lunch.reason, '上班期間用餐');
 });
