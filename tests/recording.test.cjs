@@ -1057,3 +1057,155 @@ test('cached auth initializes without a login iframe and Google sign-in still su
   assert.equal(result.lazy, true);
   assert.deepEqual(result.popup, { resolver: true, provider: 'google.com', auth: true });
 });
+
+async function setDeliveryJob(page) {
+  await page.getByRole('button', { name: '班表', exact: true }).click();
+  await page.getByRole('button', { name: '工作設定', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('計薪方式', { exact: true }).selectOption('per_order');
+  assert.equal(await dialog.getByLabel('時薪（CAD）', { exact: true }).count(), 0);
+  await dialog.getByRole('button', { name: '儲存工作', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+}
+async function openEarnings(page) {
+  await page.getByRole('button', { name: '今天', exact: true }).click();
+  await page.locator('.earnings-card').getByRole('button', { name: /^(記錄收入|編輯收入)$/ }).click();
+  return page.getByRole('dialog', { name: '記錄收入', exact: true });
+}
+async function latestSession(page) {
+  const revisions = await entityRevisions(page, 'session');
+  const parentIds = new Set(revisions.flatMap(item => item.parentIds));
+  return revisions.find(item => !parentIds.has(item.revisionId));
+}
+async function saveIncome(dialog) {
+  await dialog.getByRole('button', {name:'儲存收入',exact:true}).click();
+  await dialog.waitFor({state:'hidden'});
+}
+
+test('delivery shift total and order count save, edit and reload without changing work history', async t => {
+  const page = await openPage(t);
+  await setDeliveryJob(page); await backfill(page,'startMs','上班','00:13');await backfill(page,'endMs','下班','10:24');
+  const original=await latestSession(page);
+  original.payload.breaks=[{startMs:Date.parse('2026-11-04T04:00:00-05:00'),endMs:Date.parse('2026-11-04T04:10:00-05:00'),paid:true}];
+  original.payload.note='原出勤備註';await replaceRevision(page,original);
+  let dialog=await openEarnings(page);
+  // The normal form is just a total and optional order count; pay correction is collapsed.
+  assert.equal(await dialog.locator('input:visible').count(),2);
+  assert.equal(await dialog.locator('select:visible').count(),0);
+  await dialog.getByLabel('這次總收入（CAD，含小費）',{exact:true}).fill('128.75');
+  await dialog.getByLabel('完成訂單數（選填）',{exact:true}).fill('14');
+  await assertNoOverflow(page);await saveIncome(dialog);await page.reload();
+  dialog=await openEarnings(page);
+  assert.equal(await dialog.getByLabel('這次總收入（CAD，含小費）',{exact:true}).inputValue(),'128.75');
+  assert.equal(await dialog.getByLabel('完成訂單數（選填）',{exact:true}).inputValue(),'14');
+  await dialog.getByLabel('這次總收入（CAD，含小費）',{exact:true}).fill('143.25');
+  await saveIncome(dialog);
+  const updated=await latestSession(page);
+  assert.equal(updated.payload.actualIncomeCents,14325);assert.equal(updated.payload.deliveryOrderCount,14);
+  assert.equal(updated.payload.payModeSnapshot,'per_order');
+  for(const key of ['startMs','endMs','breaks','paySnapshotCents','note','shiftId','createdAtMs'])assert.deepEqual(updated.payload[key],original.payload[key],key);
+  const csv=await page.evaluate(session=>__ontimeTest.sessionCsv({sessions:[session]}),updated.payload);
+  assert.match(csv,/payMode,deliveryOrderCount/);assert.match(csv,/per_order,14/);assert.match(csv,/14325/);
+});
+
+test('legacy delivery shift stops its old hourly estimate without inventing an income or changing older hourly work', async t => {
+  const page=await openPage(t);await backfill(page,'startMs','上班','00:13');await backfill(page,'endMs','下班','10:24');
+  const original=await latestSession(page);delete original.payload.payModeSnapshot;await replaceRevision(page,original);
+  await setDeliveryJob(page);
+  const dialog=await openEarnings(page);
+  await dialog.getByText('儲存後，這筆出勤會改為按單收入，停止原本的時薪估算。上班、下班和休息時間都會保留。',{exact:true}).waitFor();
+  await saveIncome(dialog);
+  const corrected=await latestSession(page);
+  assert.equal(corrected.payload.actualIncomeCents,null);assert.equal(corrected.payload.deliveryOrderCount,null);
+  assert.equal(corrected.payload.paySnapshotCents,2000);assert.equal(corrected.payload.payModeSnapshot,'per_order');
+  const work=await page.evaluate(({old,corrected})=>({old:__ontimeTest.workSummary(old).estimatedIncomeCents,new:__ontimeTest.workSummary(corrected).estimatedIncomeCents}),{old:original.payload,corrected:corrected.payload});
+  assert.deepEqual(work,{old:20367,new:null});
+  await page.getByRole('button',{name:'統計',exact:true}).click();
+  // The separate pre-existing hourly scheduled shift still estimates $150.00.
+  assert.match(await page.locator('.stats-summary .card').filter({hasText:'時薪估算'}).innerText(),/\$150\.00/);
+  assert.equal(await page.getByText('$203.67',{exact:true}).count(),0);
+});
+
+test('pay snapshots respect per-order and unpaid jobs, historical hourly shifts, and new live and planned work', async t => {
+  const page=await openPage(t);await setDeliveryJob(page);await backfill(page,'startMs','上班','08:00');
+  const session=await latestSession(page);
+  assert.equal(session.payload.paySnapshotCents,null);assert.equal(session.payload.payModeSnapshot,'per_order');
+  const snapshots=await page.evaluate(()=>{const job={payMode:'per_order',hourlyRateCents:2000};return[__ontimeTest.paySnapshot(job),__ontimeTest.paySnapshot({...job,payMode:'none'}),__ontimeTest.paySnapshot(job,{paySnapshotCents:2300}),__ontimeTest.paySnapshot(job,{paySnapshotCents:null,payModeSnapshot:'per_order'})];});
+  assert.deepEqual(snapshots,[{payModeSnapshot:'per_order',paySnapshotCents:null},{payModeSnapshot:'none',paySnapshotCents:null},{payModeSnapshot:'hourly',paySnapshotCents:2300},{payModeSnapshot:'per_order',paySnapshotCents:null}]);
+  await backfill(page,'endMs','下班','09:00');
+  await page.getByRole('button',{name:'今天',exact:true}).click();await page.getByRole('button',{name:'開始上班',exact:true}).click();
+  const picker=page.getByRole('dialog');
+  await picker.locator('#shift-pick').selectOption('');
+  await picker.getByRole('button',{name:'開始上班',exact:true}).click();await picker.waitFor({state:'hidden'});
+  const active=(await entityRevisions(page,'session')).find(item=>item.payload.endMs===null&&item.entityId!==session.entityId);
+  assert.equal(active.payload.paySnapshotCents,null);assert.equal(active.payload.payModeSnapshot,'per_order');
+  await page.getByRole('button',{name:'班表',exact:true}).click();await page.getByRole('button',{name:'新增班次',exact:true}).click();
+  await page.getByRole('dialog').getByLabel('日期',{exact:true}).fill('2026-11-05');
+  await page.getByRole('dialog').getByRole('button',{name:'儲存班次',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
+  const shift=(await entityRevisions(page,'shift')).find(item=>item.payload.startMs===Date.parse('2026-11-05T09:00:00-05:00'));
+  assert.equal(shift.payload.paySnapshotCents,null);assert.equal(shift.payload.payModeSnapshot,'per_order');
+});
+
+test('income validates cents and whole order counts; missing, zero and older backups remain distinct', async t => {
+  const page=await openPage(t);await setDeliveryJob(page);await backfill(page,'startMs','上班','08:00');
+  const original=await latestSession(page);let dialog=await openEarnings(page);
+  await dialog.getByLabel('這次總收入（CAD，含小費）',{exact:true}).fill('1.234');
+  await dialog.getByRole('button',{name:'儲存收入',exact:true}).click();assert.match(await dialog.getByRole('alert').innerText(),/兩位小數/);
+  assert.equal((await latestSession(page)).revisionId,original.revisionId);
+  await dialog.getByLabel('這次總收入（CAD，含小費）',{exact:true}).fill('0');
+  await dialog.getByLabel('完成訂單數（選填）',{exact:true}).fill('1.5');
+  await dialog.getByRole('button',{name:'儲存收入',exact:true}).click();assert.match(await dialog.getByRole('alert').innerText(),/整數/);
+  await dialog.getByLabel('完成訂單數（選填）',{exact:true}).fill('0');await saveIncome(dialog);
+  let saved=await latestSession(page);assert.equal(saved.payload.actualIncomeCents,0);assert.equal(saved.payload.deliveryOrderCount,0);
+  const validation=await page.evaluate(({original,saved})=>{const check=revision=>{try{__ontimeTest.validateRevision(revision);return true;}catch{return false;}};const invalid=structuredClone(saved);invalid.payload.deliveryOrderCount=-1;const old=structuredClone(original);delete old.payload.payModeSnapshot;return[check(old),check(saved),check(invalid)];},{original,saved});
+  assert.deepEqual(validation,[true,true,false]);
+  dialog=await openEarnings(page);await dialog.getByLabel('這次總收入（CAD，含小費）',{exact:true}).fill('');await dialog.getByLabel('完成訂單數（選填）',{exact:true}).fill('');await saveIncome(dialog);
+  saved=await latestSession(page);assert.equal(saved.payload.actualIncomeCents,null);assert.equal(saved.payload.deliveryOrderCount,null);
+});
+
+test('offline delivery totals and order counts survive reopening and sync with the work session on reconnect', async t => {
+  const {page,uid}=await openSyncPage(t);await setDeliveryJob(page);await backfill(page,'startMs','上班','08:00');await waitForPending(page,uid,0);
+  await setDisconnected(page,uid,true);
+  let dialog=await openEarnings(page);
+  await dialog.getByLabel('這次總收入（CAD，含小費）',{exact:true}).fill('156.80');await dialog.getByLabel('完成訂單數（選填）',{exact:true}).fill('17');await saveIncome(dialog);
+  const stored=await pendingSnapshot(page,uid),session=stored.data.sessions[0];assert.equal(session.actualIncomeCents,15680);assert.equal(session.deliveryOrderCount,17);assert.equal(stored.pending.length,1);
+  await page.reload();dialog=await openEarnings(page);
+  assert.equal(await dialog.getByLabel('這次總收入（CAD，含小費）',{exact:true}).inputValue(),'156.8');assert.equal(await dialog.getByLabel('完成訂單數（選填）',{exact:true}).inputValue(),'17');
+  await dialog.getByRole('button',{name:'取消',exact:true}).click();await dialog.waitFor({state:'hidden'});
+  await setDisconnected(page,uid,false);await waitForPending(page,uid,0);
+  assert.deepEqual(harness.cloud(uid).get(stored.pending[0].revisionId).payload,session);
+});
+
+test('a closed journey with a missing arrival is bounded by work and never keeps growing after home', async t => {
+  const page=await openPage(t);
+  const result=await page.evaluate(()=>{
+    const at=time=>Date.parse(`2026-11-04T${time}:00-05:00`);
+    const journey={id:'synthetic-trip',jobId:'delivery-job',shiftIds:[],sessionIds:[],leaveHomeMs:at('00:00'),boardOutboundMs:at('00:10'),arriveDestinationMs:null,leaveDestinationMs:null,boardReturnMs:at('10:30'),arriveHomeMs:at('11:19'),timeZone:'America/Toronto'};
+    const session={id:'synthetic-work',jobId:'delivery-job',shiftId:null,startMs:at('00:13'),endMs:at('10:24'),breaks:[],paySnapshotCents:null,payModeSnapshot:'per_order',actualIncomeCents:null,timeZone:'America/Toronto'};
+    const data={settings:{timeZone:'America/Toronto'},sessions:[session],journeys:[journey],shifts:[],meals:[],sleeps:[]};
+    const get=now=>{const budget=__ontimeTest.budget(data,'2026-11-04',{nowMs:at(now)});return{minutes:budget.workOccupiedMs/60000,unknown:budget.unknownCommute,intervals:budget.projection.intervals.filter(item=>item.kind.startsWith('commute')).map(item=>({kind:item.kind,quality:item.quality,minutes:(item.endMs-item.startMs)/60000}))};};
+    return[get('12:04'),get('16:00')];
+  });
+  assert.deepEqual(result[0],result[1]);assert.equal(result[0].minutes,673);
+  assert.deepEqual(result[0].intervals,[{kind:'commute-out',quality:'unknown',minutes:13},{kind:'commute-back',quality:'actual',minutes:49}]);assert.equal(result[0].unknown,true);
+  // UI must flag the unknown outbound segment and exclude it from the known commute sum.
+  await backfill(page,'leaveHomeMs','出門','00:00');await backfill(page,'boardOutboundMs','去程搭車','00:10');
+  await backfill(page,'startMs','上班','00:13');await backfill(page,'endMs','下班','10:24');
+  await backfill(page,'boardReturnMs','回程搭車','10:30');await backfill(page,'arriveHomeMs','到家','11:19');
+  await page.getByRole('button',{name:'統計',exact:true}).click();
+  assert.match(await page.locator('.stats-summary .card').filter({hasText:'未知時段'}).innerText(),/有/);
+  assert.match(await page.locator('.stats-summary .card').filter({hasText:'通勤時間'}).innerText(),/已知時間；另有通勤待補登/);
+});
+
+test('a night shift receipt is counted once by clock-in date while both days retain their work time', async t => {
+  const page=await openPage(t);await setDeliveryJob(page);
+  await backfill(page,'startMs','上班','23:50','2026-11-03');await backfill(page,'endMs','下班','00:20','2026-11-04');
+  const dialog=await openEarnings(page);await dialog.getByLabel('這次總收入（CAD，含小費）',{exact:true}).fill('40.25');await dialog.getByLabel('完成訂單數（選填）',{exact:true}).fill('4');await saveIncome(dialog);
+  await page.getByRole('button',{name:'統計',exact:true}).click();await page.getByRole('button',{name:'自訂',exact:true}).click();
+  const dates=page.locator('input[type=date]');await dates.nth(0).fill('2026-11-03');await dates.nth(1).fill('2026-11-03');
+  const receipts=page.locator('.stats-summary .card').filter({hasText:'實收紀錄'});
+  assert.match(await receipts.innerText(),/\$40\.25/);
+  await dates.nth(1).fill('2026-11-04');await dates.nth(0).fill('2026-11-04');
+  assert.match(await receipts.innerText(),/—/);assert.equal(await page.locator('.earnings-card').count(),0);
+  assert.match(await page.locator('tbody').innerText(),/30 分鐘/);
+});

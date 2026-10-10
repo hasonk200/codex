@@ -5,7 +5,7 @@ const cacheName = `${prefix}v1`;
 const shell = new URL('./', base).href;
 const assets = new URL('./assets/', base).pathname;
 const core = [shell, new URL('./assets/app.css', base).href,
-  new URL('./assets/design.css?v=meals-offline-1', base).href, new URL('./assets/fonts/fonts.css', base).href];
+  new URL('./assets/design.css?v=delivery-earnings-1', base).href, new URL('./assets/fonts/fonts.css', base).href];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(core.map(url => new Request(url, { cache: 'reload' })))));
