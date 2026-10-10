@@ -297,3 +297,19 @@ td { font-size: 14px; padding-block: 16px; font-variant-numeric: tabular-nums; }
   .time-hero-aside strong { grid-column: 1; grid-row: auto; }
   .time-category strong { white-space: normal; }
 }
+
+/* Each secondary form starts with the task and reveals optional details on demand. */
+.event-modal, .compact-form-modal { max-width: 480px; }
+.event-context { margin: 0; color: var(--dim); font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; }
+.field > span { font-size: 13px; font-weight: 500; line-height: 1.6; }
+.form-extra { border-top: 1px solid var(--line); padding-top: 12px; }
+.form-extra > summary { min-height: 44px; display: flex; align-items: center; gap: 10px; cursor: pointer; color: var(--dim); font-size: 13px; line-height: 1.6; }
+.form-extra > summary::before { content: '›'; font-size: 20px; transform-origin: center; }
+.form-extra[open] > summary::before { transform: rotate(90deg); }
+.form-extra > summary::-webkit-details-marker { display: none; }
+.form-extra > .form { margin-top: 14px; }
+.form-extra:focus-within { border-color: var(--sun); }
+.event-modal .modal-actions .primary, .compact-form-modal .modal-actions .primary { flex: 1; }
+.event-form > .notice .button { margin-top: 10px; }
+.compact-form-modal .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.compact-form-modal > .modal-body > .field + .form { margin-top: 20px; }
