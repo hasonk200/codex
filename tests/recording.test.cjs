@@ -1209,3 +1209,108 @@ test('a night shift receipt is counted once by clock-in date while both days ret
   assert.match(await receipts.innerText(),/—/);assert.equal(await page.locator('.earnings-card').count(),0);
   assert.match(await page.locator('tbody').innerText(),/30 分鐘/);
 });
+
+async function mealPhotoFile(page, color = '#eeaa55', noisy = false) {
+  const dataUrl = await page.evaluate(({color,noisy}) => {
+    const canvas = document.createElement('canvas'); canvas.width = noisy ? 2400 : 640; canvas.height = noisy ? 1800 : 480;
+    const context = canvas.getContext('2d');context.fillStyle=color;context.fillRect(0,0,canvas.width,canvas.height);
+    if(noisy){const pixels=context.createImageData(canvas.width,canvas.height);let seed=42;for(let i=0;i<pixels.data.length;i+=4){seed=(Math.imul(seed,1664525)+1013904223)>>>0;pixels.data[i]=seed&255;pixels.data[i+1]=(seed>>>8)&255;pixels.data[i+2]=(seed>>>16)&255;pixels.data[i+3]=255;}context.putImageData(pixels,0,0);}
+    else{context.fillStyle='#fff6df';context.beginPath();context.ellipse(320,240,205,155,0,0,Math.PI*2);context.fill();context.fillStyle='#55935c';for(let i=0;i<8;i++){context.beginPath();context.ellipse(230+(i%4)*55,195+Math.floor(i/4)*75,22,14,.6,0,Math.PI*2);context.fill();}}
+    return canvas.toDataURL('image/png');
+  },{color,noisy});
+  return {name:'meal-test.png',mimeType:'image/png',buffer:Buffer.from(dataUrl.split(',')[1],'base64')};
+}
+async function attachMealPhoto(dialog, file) {
+  await dialog.getByLabel('選擇用餐相片',{exact:true}).setInputFiles(file);
+  await dialog.getByRole('button',{name:'更換相片',exact:true}).waitFor();
+  await waitForValue(()=>dialog.getByRole('button',{name:'更換相片',exact:true}).isEnabled(),true);
+  await dialog.getByAltText('用餐相片預覽',{exact:true}).waitFor();
+}
+async function latestMeal(page) {
+  const revisions=await entityRevisions(page,'meal'),parents=new Set(revisions.flatMap(item=>item.parentIds));
+  return revisions.find(item=>!parents.has(item.revisionId));
+}
+
+test('meal photo upload previews, survives reopening and time edits, and supports replacement and removal',async t=>{
+  const page=await openPage(t);let dialog=await openManualMeal(page,'12:00','12:20','lunch');
+  await attachMealPhoto(dialog,await mealPhotoFile(page));
+  await dialog.getByText('餐點、地點與備註（選填）',{exact:true}).click();await dialog.getByLabel('吃什麼',{exact:true}).fill('測試餐點');await dialog.getByLabel('備註',{exact:true}).fill('原本備註');
+  await saveMeal(page);const original=await latestMeal(page);
+  assert.ok(original.payload.photo.dataUrl.startsWith('data:image/jpeg;base64,/9j/'));assert.ok(original.payload.photo.dataUrl.length<=262144);
+  await page.reload();await page.getByRole('button',{name:'用餐安排',exact:true}).click();
+  await page.getByRole('button',{name:'複製到別天',exact:true}).click();let copyDialog=page.getByRole('dialog');await copyDialog.locator('input[type=date]').fill('2026-11-05');await copyDialog.getByRole('button',{name:'複製 1 餐',exact:true}).click();await copyDialog.waitFor({state:'hidden'});
+  const copied=await page.evaluate(async()=>{const repository=new __ontimeTest.Repository('fixture:planning',{localOnly:true});try{return(await repository.getDraft('meal-draft:2026-11-04')).payload;}finally{await repository.close();}});assert.equal(copied[0].photo,null);assert.equal(copied[0].food,'測試餐點');
+  await page.getByRole('button',{name:'查看用餐相片',exact:true}).click();
+  const viewer=page.getByRole('dialog',{name:'用餐相片',exact:true});await viewer.getByAltText('測試餐點的相片',{exact:true}).waitFor();
+  assert.equal(await viewer.locator('img').evaluate(image=>image.complete&&image.naturalWidth>0),true);
+  await viewer.getByRole('button',{name:'關閉',exact:true}).click();await viewer.waitFor({state:'hidden'});
+  await page.getByRole('button',{name:'編輯',exact:true}).click();dialog=page.getByRole('dialog');
+  await dialog.getByLabel('用餐結束時間',{exact:true}).fill('12:25');await dialog.getByRole('button',{name:'儲存變更',exact:true}).click();await dialog.waitFor({state:'hidden'});
+  let updated=await latestMeal(page);assert.deepEqual(updated.payload.photo,original.payload.photo);assert.equal(updated.payload.note,'原本備註');assert.equal(updated.payload.food,'測試餐點');
+  await page.getByRole('button',{name:'編輯',exact:true}).click();dialog=page.getByRole('dialog');
+  await attachMealPhoto(dialog,await mealPhotoFile(page,'#aa5577'));await dialog.getByRole('button',{name:'儲存變更',exact:true}).click();await dialog.waitFor({state:'hidden'});
+  updated=await latestMeal(page);assert.notEqual(updated.payload.photo.dataUrl,original.payload.photo.dataUrl);assert.equal(updated.payload.endMs,Date.parse('2026-11-04T12:25:00-05:00'));
+  await page.getByRole('button',{name:'編輯',exact:true}).click();dialog=page.getByRole('dialog');await dialog.getByRole('button',{name:'移除相片',exact:true}).click();
+  assert.equal(await dialog.getByAltText('用餐相片預覽',{exact:true}).count(),0);await dialog.getByRole('button',{name:'儲存變更',exact:true}).click();await dialog.waitFor({state:'hidden'});
+  assert.equal((await latestMeal(page)).payload.photo,null);assert.equal(await page.getByRole('button',{name:'查看用餐相片',exact:true}).count(),0);
+  assert.ok((await entityRevisions(page,'meal')).some(item=>item.revisionId===original.revisionId&&item.payload.photo.dataUrl===original.payload.photo.dataUrl));
+});
+
+test('meal photos compress within the sync limit, reject invalid files without losing the photo, and round-trip backups',async t=>{
+  const page=await openPage(t),dialog=await openManualMeal(page,'12:00','12:20','lunch');
+  await attachMealPhoto(dialog,await mealPhotoFile(page,'#eeaa55',true));
+  const photo=await dialog.getByAltText('用餐相片預覽',{exact:true}).evaluate(image=>({dataUrl:image.src,width:image.width,height:image.height}));
+  assert.ok(photo.dataUrl.length<=262144);assert.ok(photo.width<=1280&&photo.height<=1280);
+  await dialog.getByLabel('選擇用餐相片',{exact:true}).setInputFiles({name:'not-a-photo.txt',mimeType:'text/plain',buffer:Buffer.from('not an image')});
+  assert.match(await dialog.getByRole('alert').innerText(),/請選擇/);
+  assert.equal(await dialog.getByAltText('用餐相片預覽',{exact:true}).getAttribute('src'),photo.dataUrl);
+  await dialog.getByLabel('選擇用餐相片',{exact:true}).setInputFiles({name:'broken.jpg',mimeType:'image/jpeg',buffer:Buffer.from('broken image bytes')});
+  await waitForValue(()=>dialog.getByRole('alert').innerText().then(text=>text.includes('讀不到')),true);
+  assert.equal(await dialog.getByAltText('用餐相片預覽',{exact:true}).getAttribute('src'),photo.dataUrl);
+  await saveMeal(page);const saved=await latestMeal(page);
+  assert.ok(Buffer.byteLength(JSON.stringify(saved))<300000);
+  const roundTrip=await page.evaluate(async revision=>{
+    const backup=__ontimeTest.parseBackup(JSON.stringify(__ontimeTest.exportBackup([revision])));
+    const old=structuredClone(revision);delete old.payload.photo;
+    const remote=structuredClone(revision);remote.payload.photo.dataUrl='https://example.test/private-photo.jpg';
+    const svg=structuredClone(revision);svg.payload.photo.dataUrl='data:image/svg+xml;base64,PHN2Zy8+';
+    const check=value=>{try{__ontimeTest.validateRevision(value);return true;}catch{return false;}};
+    const repository=new __ontimeTest.Repository('photo-backup-'+crypto.randomUUID(),{localOnly:true});let imported;try{await repository.saveRemoteRevision(revision);await repository.replaceAllLocalData(backup.revisions);imported=(await repository.loadAppData()).data.meals[0].photo;}finally{await repository.close();}
+    return{photo:backup.revisions[0].payload.photo,imported,valid:[check(old),check(revision),check(remote),check(svg)]};
+  },saved);
+  assert.deepEqual(roundTrip.photo,saved.payload.photo);assert.deepEqual(roundTrip.imported,saved.payload.photo);assert.ok(saved.payload.photo.dataUrl.length>64*1024);assert.deepEqual(roundTrip.valid,[true,true,false,false]);
+});
+
+test('meal photos save offline, reopen without a network, and sync the image with the same meal revision',async t=>{
+  const{page,uid}=await openSyncPage(t);const file=await mealPhotoFile(page,'#eeaa55',true);
+  await setDisconnected(page,uid,true);const dialog=await openManualMeal(page,'12:00','12:20','lunch');await attachMealPhoto(dialog,file);await saveMeal(page);
+  const local=await pendingSnapshot(page,uid);assert.equal(local.pending.length,1);const saved=local.pending[0];assert.ok(saved.payload.photo.dataUrl.startsWith('data:image/jpeg;base64,'));assert.equal(harness.cloud(uid).has(saved.revisionId),false);
+  await page.reload();await page.getByRole('button',{name:'用餐安排',exact:true}).click();await page.getByRole('button',{name:'查看用餐相片',exact:true}).click();
+  assert.equal(await page.getByRole('dialog').locator('img').evaluate(image=>image.complete&&image.naturalWidth>0),true);
+  await page.getByRole('dialog').getByRole('button',{name:'關閉',exact:true}).click();await page.getByRole('dialog').waitFor({state:'hidden'});
+  await setDisconnected(page,uid,false);await waitForPending(page,uid,0);assert.deepEqual(harness.cloud(uid).get(saved.revisionId),local.revisions.find(item=>item.revisionId===saved.revisionId));
+});
+
+test('meal photo editor, cards and viewer fit small phones and desktop in both themes',async t=>{
+  const page=await openPage(t);let dialog=await openManualMeal(page,'12:00','12:20','lunch');await attachMealPhoto(dialog,await mealPhotoFile(page));await saveMeal(page);
+  for(const theme of['dark','light']){
+    await page.getByRole('button',{name:'我的',exact:true}).click();await page.getByLabel('主題',{exact:true}).selectOption(theme);const saveSettings=page.getByRole('button',{name:'儲存設定',exact:true});if(await saveSettings.count())await saveSettings.click();await page.getByRole('button',{name:'用餐安排',exact:true}).click();
+    for(const width of[320,390,430,1440]){
+      await page.setViewportSize({width,height:844});await assertNoOverflow(page);
+      await page.getByRole('button',{name:'編輯',exact:true}).click();dialog=page.getByRole('dialog');await assertNoOverflow(page);
+      const save=dialog.getByRole('button',{name:'儲存變更',exact:true});assert.ok((await save.boundingBox()).y<844);await dialog.getByRole('button',{name:'取消',exact:true}).click();await dialog.waitFor({state:'hidden'});
+      await page.getByRole('button',{name:'查看用餐相片',exact:true}).click();dialog=page.getByRole('dialog');await assertNoOverflow(page);await dialog.getByRole('button',{name:'關閉',exact:true}).click();await dialog.waitFor({state:'hidden'});
+    }
+  }
+});
+
+test('phone camera orientation survives meal photo resizing',async t=>{
+  const page=await openPage(t),dialog=await openManualMeal(page,'12:00','12:20','lunch');
+  const data=await page.evaluate(()=>{const canvas=document.createElement('canvas');canvas.width=1800;canvas.height=1200;const c=canvas.getContext('2d');c.fillStyle='#d99b55';c.fillRect(0,0,1800,1200);c.fillStyle='#509965';c.fillRect(0,0,900,1200);return canvas.toDataURL('image/jpeg');});
+  const jpeg=Buffer.from(data.split(',')[1],'base64');
+  // EXIF orientation 6: the camera's landscape sensor image displays as a portrait.
+  const exif=Buffer.from([0xff,0xe1,0,34,0x45,0x78,0x69,0x66,0,0,0x49,0x49,0x2a,0,8,0,0,0,1,0,0x12,1,3,0,1,0,0,0,6,0,0,0,0,0,0,0]);
+  await attachMealPhoto(dialog,{name:'camera.jpg',mimeType:'image/jpeg',buffer:Buffer.concat([jpeg.subarray(0,2),exif,jpeg.subarray(2)])});
+  await saveMeal(page);const photo=(await latestMeal(page)).payload.photo;
+  assert.ok(photo.height>photo.width);assert.equal(photo.height,1280);assert.ok(Math.abs(photo.width/photo.height-2/3)<.002);
+});
