@@ -16,12 +16,16 @@ before(async () => {
     const root = resolve(__dirname, '..');
     if (await harness.handle(request, response, root)) return;
     const pathname = new URL(request.url, 'http://localhost').pathname;
+    if (pathname === '/manifest.webmanifest') {
+      response.writeHead(200, { 'Content-Type': 'application/manifest+json' });
+      response.end(readFileSync(join(root, 'manifest.webmanifest'))); return;
+    }
     if (pathname.startsWith('/assets/')) {
       const path = resolve(root, `.${pathname}`);
       if (!path.startsWith(`${root}${sep}assets${sep}`) || !existsSync(path)) {
         response.writeHead(404); response.end(); return;
       }
-      response.writeHead(200, { 'Content-Type': extname(path) === '.woff2' ? 'font/woff2' : 'text/css; charset=utf-8' });
+      response.writeHead(200, { 'Content-Type': ({ '.woff2': 'font/woff2', '.js': 'application/javascript', '.png': 'image/png' })[extname(path)] || 'text/css; charset=utf-8' });
       response.end(readFileSync(path)); return;
     }
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });

@@ -5,7 +5,9 @@ const cacheName = `${prefix}v1`;
 const shell = new URL('./', base).href;
 const assets = new URL('./assets/', base).pathname;
 const core = [shell, new URL('./assets/app.css', base).href,
-  new URL('./assets/design.css?v=meal-photos-1', base).href, new URL('./assets/fonts/fonts.css', base).href];
+  new URL('./assets/design.css?v=pwa-1', base).href, new URL('./assets/fonts/fonts.css', base).href,
+  new URL('./manifest.webmanifest', base).href, new URL('./assets/pwa.js?v=pwa-1', base).href,
+  ...['icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png'].map(name => new URL('./assets/icons/' + name, base).href)];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(core.map(url => new Request(url, { cache: 'reload' })))));
@@ -37,7 +39,7 @@ self.addEventListener('fetch', event => {
         return (await cache.match(shell)) ?? response;
       } catch (error) { const cached = await cache.match(shell); if (cached) return cached; throw error; }
     })());
-  } else if (url.pathname.startsWith(assets)) {
+  } else if (url.pathname.startsWith(assets) || url.pathname === new URL('./manifest.webmanifest', base).pathname) {
     event.respondWith((async () => {
       const cache = await caches.open(cacheName), cached = await cache.match(request);
       if (cached) return cached;
