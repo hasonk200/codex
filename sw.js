@@ -1,3 +1,4 @@
+/* App release: overnight-route-1; refresh the cached inline app bundle. */
 /* Cache only this app's public shell and assets. Account records stay in IndexedDB. */
 const base = new URL('./', self.location.href);
 const prefix = `ontime-shell:${base.pathname}:`;

@@ -454,6 +454,72 @@ async function journeyRevisions(page) {
   });
 }
 
+async function seedOvernightRoute(page) {
+  return page.evaluate(async () => {
+    const repo=new __ontimeTest.Repository('fixture:planning',{localOnly:true});
+    try {
+      const {data}=await repo.loadAppData(),jobId=data.jobs[0].id;
+      const at=value=>Date.parse(value+'-05:00');
+      const session={id:crypto.randomUUID(),jobId,shiftId:null,timeZone:'America/Toronto',startMs:at('2026-11-03T23:29:00'),endMs:at('2026-11-04T10:16:00'),breaks:[],paySnapshotCents:2000,payModeSnapshot:'hourly',actualIncomeCents:12345,note:'夜班測試紀錄',createdAtMs:1,updatedAtMs:2};
+      const journey={id:crypto.randomUUID(),jobId,shiftIds:[],sessionIds:[],timeZone:'America/Toronto',origin:'家',destination:'工作',leaveHomeMs:at('2026-11-03T22:45:00'),boardOutboundMs:at('2026-11-03T22:55:00'),arriveDestinationMs:at('2026-11-03T23:28:00'),leaveDestinationMs:null,boardReturnMs:at('2026-11-04T10:22:00'),arriveHomeMs:null,note:'夜間通勤測試'};
+      const previous={...session,id:crypto.randomUUID(),startMs:at('2026-11-02T01:28:00'),endMs:at('2026-11-02T11:31:00')};
+      for(const payload of [previous,session])await repo.saveEntityRevision({entityType:'session',entityId:payload.id,payload,baseParentIds:[]});
+      await repo.saveEntityRevision({entityType:'journey',entityId:journey.id,payload:journey,baseParentIds:[]});
+      return {session,journey};
+    } finally {await repo.close();}
+  });
+}
+
+test('overnight route retains clock-in and clock-out while riding home, after arriving and after reloading', async t => {
+  const page=await openPage(t);
+  const seeded=await seedOvernightRoute(page);
+  await page.context().addInitScript(()=>{Date.now=()=>Date.parse('2026-11-04T10:30:00-05:00');});
+  await page.reload();
+  await page.getByLabel('今天進度',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'到家了',exact:true}).waitFor();
+  assert.deepEqual(await page.locator('.route-time').allTextContents(),['22:45','22:55','23:28','23:29','10:16','10:22','—']);
+  const attendance=await entityRevisions(page,'session');
+  await page.evaluate(()=>{Date.now=()=>Date.parse('2026-11-04T11:03:00-05:00');dispatchEvent(new Event('ontime:recorded'));});
+  await page.getByRole('button',{name:'到家了',exact:true}).click();
+  await waitForValue(()=>page.locator('.route-time').last().innerText(),'11:03');
+  assert.deepEqual(await page.locator('.route-time').allTextContents(),['22:45','22:55','23:28','23:29','10:16','10:22','11:03']);
+  assert.deepEqual(await entityRevisions(page,'session'),attendance,'display and arrival must not rewrite attendance, pay or history');
+  await page.reload();
+  await page.getByLabel('今天進度',{exact:true}).waitFor();
+  assert.deepEqual(await page.locator('.route-time').allTextContents(),['22:45','22:55','23:28','23:29','10:16','10:22','11:03']);
+  assert.deepEqual((await entityRevisions(page,'session')).find(value=>value.entityId===seeded.session.id).payload,seeded.session);
+});
+
+test('route attendance uses explicit links, job and trip boundaries without borrowing another shift', async t => {
+  const page=await openPage(t);
+  const result=await page.evaluate(()=>{
+    const at=value=>Date.parse(value+'-05:00'),now=at('2026-11-04T12:00:00');
+    const night={id:'night',jobId:'a',shiftId:null,startMs:at('2026-11-03T23:29:00'),endMs:at('2026-11-04T10:16:00')};
+    const older={...night,id:'older',startMs:at('2026-11-02T01:28:00'),endMs:at('2026-11-02T11:31:00')};
+    const otherJob={...night,id:'other-job',jobId:'b',endMs:at('2026-11-04T10:20:00')};
+    const next={...night,id:'next',startMs:at('2026-11-04T11:00:00'),endMs:at('2026-11-04T11:45:00')};
+    const journey={id:'trip',jobId:'a',sessionIds:[],shiftIds:[],leaveHomeMs:at('2026-11-03T22:45:00'),boardOutboundMs:at('2026-11-03T22:55:00'),arriveDestinationMs:at('2026-11-03T23:28:00'),leaveDestinationMs:null,boardReturnMs:at('2026-11-04T10:22:00'),arriveHomeMs:null};
+    const data={settings:{timeZone:'America/Toronto'},sessions:[older,night,otherJob,next],journeys:[journey]};
+    const before=JSON.stringify(data);
+    const choose=(value=journey,input=data)=>__ontimeTest.routeSession(input,value,'2026-11-04',now)?.id??null;
+    const matched=choose();
+    const explicit=choose({...journey,sessionIds:['older']});
+    const dangling=choose({...journey,sessionIds:['not-downloaded']});
+    const wrongJobLink=choose({...journey,sessionIds:['other-job']});
+    const newTrip=choose({...journey,id:'new-trip',leaveHomeMs:at('2026-11-04T11:50:00'),arriveDestinationMs:at('2026-11-04T11:55:00'),boardReturnMs:null});
+    const standalone=choose(null,{...data,sessions:[night,older]});
+    const missingReturn=choose({...journey,boardReturnMs:null},{...data,journeys:[journey,{...journey,id:'next-trip',leaveHomeMs:at('2026-11-04T10:45:00')}]});
+    const shiftLinked=choose({...journey,shiftIds:['shift-1']},{...data,sessions:[night,{...older,id:'shift-linked',shiftId:'shift-1'}]});
+    const returnOnly={...journey,leaveHomeMs:null,boardOutboundMs:null,arriveDestinationMs:null};
+    const ambiguous=choose(returnOnly,{...data,sessions:[night,{...night,id:'second',endMs:at('2026-11-04T10:18:00')}]});
+    const returnUnique=choose(returnOnly,{...data,sessions:[night,older,otherJob]});
+    const midnight={...night,id:'midnight',endMs:at('2026-11-04T00:00:00')};
+    const atMidnight=choose(null,{...data,sessions:[midnight,older]});
+    return {matched,explicit,dangling,wrongJobLink,newTrip,standalone,missingReturn,shiftLinked,ambiguous,returnUnique,atMidnight,unchanged:before===JSON.stringify(data)};
+  });
+  assert.deepEqual(result,{matched:'night',explicit:'older',dangling:null,wrongJobLink:null,newTrip:null,standalone:'night',missingReturn:'night',shiftLinked:'shift-linked',ambiguous:null,returnUnique:'night',atMidnight:'midnight',unchanged:true});
+});
+
 async function clickAt(page, name, time) {
   const timestamp = Date.parse(`2026-11-04T${time}:00-05:00`);
   await page.evaluate(now => { Date.now = () => now; }, timestamp);

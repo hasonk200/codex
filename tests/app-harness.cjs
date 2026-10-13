@@ -6,7 +6,7 @@ let workerVariant = 'v1';
 function cloud(uid) { if (!clouds.has(uid)) clouds.set(uid, new Map()); return clouds.get(uid); }
 function instrument(html) {
   const hooks = `
-    globalThis.__ontimeTest = { Repository: Bv, prepareMealPhoto: ontimePrepareMealPhoto, parseBackup: sP, exportBackup: rP, payMode: ontimePayMode, paySnapshot: ontimePaySnapshot, workSummary: g0, validateRevision: Da, sessionCsv: oP, budget: bp, sleepIntervals: Fv, sleepDay: ontimeSleepDay, mealInput: Ip, suggestMeals: Lk, authClient: () => cc()?.auth, testGooglePopup: async () => {
+    globalThis.__ontimeTest = { Repository: Bv, prepareMealPhoto: ontimePrepareMealPhoto, parseBackup: sP, exportBackup: rP, payMode: ontimePayMode, paySnapshot: ontimePaySnapshot, workSummary: g0, validateRevision: Da, sessionCsv: oP, budget: bp, routeSession: ontimeRouteSession, sleepIntervals: Fv, sleepDay: ontimeSleepDay, mealInput: Ip, suggestMeals: Lk, authClient: () => cc()?.auth, testGooglePopup: async () => {
       const original = _j; let args;
       try { _j = async (...value) => { args = value; return { user: { uid: 'popup-regression' } }; }; await SL(); return { resolver: args[2] === iO, provider: args[1].providerId, auth: args[0] === cc()?.auth }; }
       finally { _j = original; }
