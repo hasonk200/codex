@@ -5,7 +5,7 @@ const cacheName = `${prefix}v1`;
 const shell = new URL('./', base).href;
 const assets = new URL('./assets/', base).pathname;
 const core = [shell, new URL('./assets/app.css', base).href,
-  new URL('./assets/design.css?v=pwa-1', base).href, new URL('./assets/fonts/fonts.css', base).href,
+  new URL('./assets/design.css?v=sleep-studio-1', base).href, new URL('./assets/fonts/fonts.css', base).href,
   new URL('./manifest.webmanifest', base).href, new URL('./assets/pwa.js?v=pwa-1', base).href,
   ...['icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png'].map(name => new URL('./assets/icons/' + name, base).href)];
 
