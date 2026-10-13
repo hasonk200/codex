@@ -55,6 +55,7 @@ async function openPage(t, viewport = { width: 390, height: 844 }) {
   t.after(() => assert.deepEqual(errors, []));
   await page.goto(`${origin}/?fixture=1&scene=planning`);
   await page.getByRole('button', { name: '睡眠', exact: true }).click();
+  await page.locator('.sleep-studio').waitFor();
   return page;
 }
 
@@ -116,10 +117,12 @@ test('sleep page is independent and today opens its recording destination', asyn
   assert.match(await page.getByLabel('實際睡眠摘要').innerText(),/尚未記錄/);
   assert.match(await page.locator('.sleep-week-stats').innerText(),/0 \/ 7 天/);
   await page.getByRole('button',{name:'我的時間',exact:true}).click();
+  await page.locator('.time-studio').waitFor();
   assert.equal(await page.getByLabel('睡眠日期',{exact:true}).count(),0);
   assert.equal(await page.getByRole('button',{name:'記錄睡眠',exact:true}).count(),0);
   await page.getByRole('button',{name:'今天',exact:true}).click();
   await page.getByRole('button',{name:'記錄睡眠',exact:true}).click();
+  await page.locator('.sleep-studio').waitFor();
   assert.equal(await page.getByRole('heading',{name:'睡眠',exact:true}).count(),1);
   assert.equal(await page.locator('.bottom-nav button[aria-current="page"]').getAttribute('aria-label'),'睡眠');
 });
