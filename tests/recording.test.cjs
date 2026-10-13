@@ -54,7 +54,7 @@ async function openPage(t, viewport = { width: 390, height: 844 }) {
   page.on('pageerror', error => errors.push(error.message));
   t.after(() => assert.deepEqual(errors, []));
   await page.goto(`${origin}/?fixture=1&scene=planning`);
-  await page.getByRole('button', { name: '我的時間', exact: true }).click();
+  await page.getByRole('button', { name: '睡眠', exact: true }).click();
   return page;
 }
 
@@ -68,6 +68,84 @@ async function saveSleep(page, plan = false) {
   await page.getByRole('button', { name: plan ? '儲存睡眠計畫' : '儲存睡眠紀錄', exact: true }).click();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
 }
+
+test('sleep priority: actual times replace the whole plan and an ongoing timer ends at now', async t => {
+  const page = await openPage(t);
+  const result = await page.evaluate(() => {
+    const zone = 'America/Toronto', now = Date.parse('2026-11-04T12:00:00-05:00');
+    const sleep = { id:'priority', plannedStartMs:Date.parse('2026-11-04T09:00:00-05:00'), plannedEndMs:Date.parse('2026-11-04T15:00:00-05:00'), actualStartMs:Date.parse('2026-11-04T10:00:00-05:00'), actualEndMs:null };
+    const intervals = mode => __ontimeTest.sleepIntervals([sleep], '2026-11-04', zone, now, mode);
+    const ongoing = intervals('effective');
+    const actual = intervals('actual');
+    const planned = intervals('planned');
+    const data={settings:{timeZone:zone},sessions:[],journeys:[],shifts:[],meals:[],sleeps:[sleep]};
+    const budget=__ontimeTest.budget(data,'2026-11-04',{nowMs:now});
+    sleep.actualEndMs=Date.parse('2026-11-04T11:00:00-05:00');
+    const complete = intervals('effective');
+    sleep.actualStartMs=null; sleep.actualEndMs=null;
+    const fallback = intervals('effective');
+    return {ongoing,actual,planned,complete,fallback,budget:{sleepMs:budget.sleepMs,actual:budget.actualSleepMs,planned:budget.plannedSleepMs}};
+  });
+  assert.deepEqual(result.ongoing, result.actual);
+  assert.equal(result.ongoing[0].endMs, Date.parse('2026-11-04T12:00:00-05:00'));
+  assert.equal(result.budget.sleepMs, 2*3600000);
+  assert.equal(result.budget.actual, 2*3600000);
+  assert.equal(result.budget.planned, 6*3600000);
+  assert.equal(result.complete[0].endMs-result.complete[0].startMs, 3600000);
+  assert.deepEqual(result.fallback, result.planned);
+});
+
+test('sleep diary uses the actual wake date and counts overlapping records once, including DST', async t => {
+  const page = await openPage(t);
+  const result = await page.evaluate(() => {
+    const sleep = { id:'wake-date', plannedStartMs:Date.parse('2026-10-30T23:00:00-04:00'), plannedEndMs:Date.parse('2026-10-31T07:00:00-04:00'), actualStartMs:Date.parse('2026-10-31T23:00:00-04:00'), actualEndMs:Date.parse('2026-11-01T07:00:00-05:00') };
+    const nap = { id:'overlap', plannedStartMs:null,plannedEndMs:null,actualStartMs:Date.parse('2026-11-01T06:00:00-05:00'),actualEndMs:Date.parse('2026-11-01T07:30:00-05:00') };
+    const today=__ontimeTest.sleepDay([sleep,nap],'2026-11-01','America/Toronto',Date.parse('2026-11-04T17:00:00Z'));
+    const plannedDate=__ontimeTest.sleepDay([sleep],'2026-10-30','America/Toronto',Date.parse('2026-11-04T17:00:00Z'));
+    return {total:today.actualMs,completed:today.completedMs,count:today.actual.length,wrongDateCount:plannedDate.actual.length};
+  });
+  assert.equal(result.count,2);
+  assert.equal(result.total,9.5*3600000);
+  assert.equal(result.completed,result.total);
+  assert.equal(result.wrongDateCount,0);
+});
+
+test('sleep page is independent and today opens its recording destination', async t => {
+  const page = await openPage(t);
+  assert.equal(await page.getByRole('heading',{name:'睡眠',exact:true}).count(),1);
+  assert.match(await page.getByLabel('實際睡眠摘要').innerText(),/尚未記錄/);
+  assert.match(await page.locator('.sleep-week-stats').innerText(),/0 \/ 7 天/);
+  await page.getByRole('button',{name:'我的時間',exact:true}).click();
+  assert.equal(await page.getByLabel('睡眠日期',{exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'記錄睡眠',exact:true}).count(),0);
+  await page.getByRole('button',{name:'今天',exact:true}).click();
+  await page.getByRole('button',{name:'記錄睡眠',exact:true}).click();
+  assert.equal(await page.getByRole('heading',{name:'睡眠',exact:true}).count(),1);
+  assert.equal(await page.locator('.bottom-nav button[aria-current="page"]').getAttribute('aria-label'),'睡眠');
+});
+
+test('sleep one-tap timer preserves a plan but records actual elapsed time until wake', async t => {
+  const page = await openPage(t);
+  const dialog=await openSleep(page,'2026-11-04',true);
+  await dialog.getByLabel('預計入睡時間',{exact:true}).fill('12:00');
+  await dialog.getByLabel('預計起床時間',{exact:true}).fill('14:00');
+  await saveSleep(page,true);
+  const [planned]=await sleepRevisions(page);
+  await page.getByRole('button',{name:'現在入睡',exact:true}).click();
+  await page.getByRole('button',{name:'現在起床',exact:true}).waitFor();
+  await page.evaluate(()=>{ Date.now=()=>Date.parse('2026-11-04T12:30:00-05:00'); dispatchEvent(new Event('ontime:recorded')); });
+  await page.getByLabel('實際睡眠摘要').getByRole('heading',{name:'30 分鐘',exact:true}).waitFor();
+  await page.getByRole('button',{name:'現在起床',exact:true}).click();
+  await page.getByRole('button',{name:'現在起床',exact:true}).waitFor({state:'hidden'});
+  const revisions=await sleepRevisions(page);
+  const completed=revisions.find(value=>value.payload?.actualEndMs!=null);
+  assert.equal(completed.entityId,planned.entityId);
+  assert.equal(completed.payload.plannedEndMs,planned.payload.plannedEndMs);
+  assert.equal(completed.payload.actualEndMs-completed.payload.actualStartMs,30*60000);
+  assert.match(await page.locator('.sleep-actual-log').innerText(),/30 分鐘/);
+  assert.equal(await page.locator('.sleep-plan-entry').count(),0);
+  assert.match(await page.locator('.sleep-week-stats').innerText(),/1 \/ 7 天/);
+});
 
 async function sleepRevisions(page) {
   return page.evaluate(async () => {
@@ -111,7 +189,7 @@ test('overnight sleep uses tomorrow and persists an eight-hour actual record', a
   assert.equal(revision.payload.plannedStartMs, null);
   assert.equal(revision.payload.note, '半夜醒來一次');
   await page.reload();
-  await page.getByRole('button', { name: '我的時間', exact: true }).click();
+  await page.getByRole('button', { name: '睡眠', exact: true }).click();
   await page.getByLabel('睡眠日期', { exact: true }).fill('2026-11-02');
   assert.match(await page.locator('.sleep-list').innerText(), /8 小時/);
 });
@@ -189,7 +267,7 @@ test('DST choices appear only for repeated times and note edits preserve the rec
     db.close();
   }, saved);
   await page.reload();
-  await page.getByRole('button', { name: '我的時間', exact: true }).click();
+  await page.getByRole('button', { name: '睡眠', exact: true }).click();
   await page.getByLabel('睡眠日期', { exact: true }).fill('2026-11-01');
   await page.locator('.sleep-entry').getByRole('button', { name: '修改', exact: true }).click();
   assert.equal(await page.getByLabel('入睡重複時刻', { exact: true }).inputValue(), 'later');
@@ -287,14 +365,14 @@ test('single-event backfill saves all eight times into the same trip and attenda
   assert.deepEqual(await page.locator('.route-time').allTextContents(), ['07:00', '07:10', '07:30', '08:00', '09:00', '09:15', '09:30']);
 });
 
-test('six pages and their editors fit narrow phones; sleep save stays visible', async t => {
+test('seven pages and their editors fit narrow phones; sleep save stays visible', async t => {
   for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 430, height: 932 }]) {
     const page = await openPage(t, viewport);
-    for (const name of ['今天', '班表', '用餐安排', '我的時間', '統計', '我的']) {
+    for (const name of ['今天', '班表', '用餐安排', '睡眠', '我的時間', '統計', '我的']) {
       await page.getByRole('button', { name, exact: true }).click();
       await assertNoOverflow(page);
     }
-    await page.getByRole('button', { name: '我的時間', exact: true }).click();
+    await page.getByRole('button', { name: '睡眠', exact: true }).click();
     const dialog = await openSleep(page);
     await assertNoOverflow(page);
     const saveButton = page.getByRole('button', { name: '儲存睡眠紀錄', exact: true });
@@ -337,7 +415,7 @@ test('dialog traps keyboard focus, restores focus and scroll, and supports light
   await page.getByLabel('主題', { exact: true }).selectOption('light');
   await page.getByRole('button', { name: '儲存設定', exact: true }).click();
   await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
-  await page.getByRole('button', { name: '我的時間', exact: true }).click();
+  await page.getByRole('button', { name: '睡眠', exact: true }).click();
   await openSleep(page);
   assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'light');
   await assertNoOverflow(page);
@@ -484,7 +562,7 @@ test('transit: seven steps and both boarding controls fit phones and desktop', a
 });
 
 test('design: every page fits narrow phones and desktop in dark and light themes', async t => {
-  const tabs = ['今天', '班表', '用餐安排', '我的時間', '統計', '我的'];
+  const tabs = ['今天', '班表', '用餐安排', '睡眠', '我的時間', '統計', '我的'];
   for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 430, height: 932 }, { width: 1280, height: 900 }]) {
     const page = await openPage(t, viewport);
     const assetFailures = [];
@@ -938,6 +1016,31 @@ async function setDisconnected(page, uid, disconnected) {
     window.dispatchEvent(new Event(value ? 'offline' : 'online'));
   }, disconnected);
 }
+
+test('sleep timer reopens offline across midnight and uploads both actual revisions on reconnect', async t => {
+  const {page,uid}=await openSyncPage(t);
+  await page.context().addInitScript(()=>{Date.now=()=>Date.parse('2026-11-05T00:20:00-05:00');});
+  await page.evaluate(()=>{Date.now=()=>Date.parse('2026-11-04T23:50:00-05:00');dispatchEvent(new Event('ontime:recorded'));});
+  await page.getByRole('button',{name:'睡眠',exact:true}).click();
+  await setDisconnected(page,uid,true);
+  await page.getByRole('button',{name:'現在入睡',exact:true}).click();
+  await page.getByRole('button',{name:'現在起床',exact:true}).waitFor();
+  assert.equal((await pendingSnapshot(page,uid)).pending.length,1);
+  await page.reload();
+  await page.getByRole('button',{name:'睡眠',exact:true}).click();
+  assert.equal(await page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-04');
+  assert.match(await page.getByLabel('實際睡眠摘要').innerText(),/30 分鐘/);
+  await page.getByRole('button',{name:'現在起床',exact:true}).click();
+  await page.getByRole('button',{name:'現在起床',exact:true}).waitFor({state:'hidden'});
+  assert.equal(await page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-05');
+  const local=await pendingSnapshot(page,uid), revisions=local.revisions.filter(value=>value.entityType==='sleep');
+  assert.equal(revisions.length,2);
+  assert.equal(local.pending.length,2);
+  assert.equal(local.data.sleeps[0].actualEndMs-local.data.sleeps[0].actualStartMs,30*60000);
+  await setDisconnected(page,uid,false);
+  await waitForPending(page,uid,0);
+  for(const revision of revisions)assert.deepEqual(harness.cloud(uid).get(revision.revisionId),revision);
+});
 
 test('offline saves survive reopening and upload automatically on reconnect without duplicate cloud revisions', async t => {
   const { page, uid } = await openSyncPage(t);
