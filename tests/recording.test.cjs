@@ -311,6 +311,25 @@ test('plans are saved separately and survive adding actual sleep', async t => {
   assert.equal(updated.payload.actualEndMs - updated.payload.actualStartMs, 7.75 * 3600000);
 });
 
+test('adding actual overnight sleep to a plan rolls wake date forward and keeps the original plan', async t => {
+  const page=await openPage(t);
+  await openSleep(page,'2026-11-01',true);
+  await saveSleep(page,true);
+  const [plan]=await sleepRevisions(page);
+  await page.getByRole('button',{name:'記錄實際',exact:true}).click();
+  const dialog=page.getByRole('dialog');
+  await dialog.getByLabel('入睡時間',{exact:true}).fill('23:30');
+  await dialog.getByLabel('起床時間',{exact:true}).fill('07:15');
+  assert.equal(await dialog.getByLabel('起床日期',{exact:true}).inputValue(),'2026-11-02');
+  await saveSleep(page);
+  const actual=(await sleepRevisions(page)).find(value=>value.parentIds.includes(plan.revisionId));
+  assert.equal(actual.payload.plannedStartMs,plan.payload.plannedStartMs);
+  assert.equal(actual.payload.plannedEndMs,plan.payload.plannedEndMs);
+  assert.equal(actual.payload.actualEndMs-actual.payload.actualStartMs,7.75*3600000);
+  assert.equal(await page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-02');
+  assert.match(await page.getByLabel('實際睡眠摘要').innerText(),/7 小時 45 分/);
+});
+
 async function entityRevisions(page, type) {
   return page.evaluate(async type => {
     const scene = new URLSearchParams(location.search).get('scene');
@@ -1035,7 +1054,7 @@ test('sleep timer reopens offline across midnight and uploads both actual revisi
   assert.match(await page.getByLabel('實際睡眠摘要').innerText(),/30 分鐘/);
   await page.getByRole('button',{name:'現在起床',exact:true}).click();
   await page.getByRole('button',{name:'現在起床',exact:true}).waitFor({state:'hidden'});
-  assert.equal(await page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-05');
+  await waitForValue(()=>page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-05');
   const local=await pendingSnapshot(page,uid), revisions=local.revisions.filter(value=>value.entityType==='sleep');
   assert.equal(revisions.length,2);
   assert.equal(local.pending.length,2);

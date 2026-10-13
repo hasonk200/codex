@@ -1408,7 +1408,7 @@ function rD({ store, existing, date, mode, onClose, onSaved }) {
     actualStartMs: existing ? up(existing.actualStartMs, timeZone) : { value: "", occurrence: "" },
     actualEndMs: existing ? up(existing.actualEndMs, timeZone) : { value: "", occurrence: "" }
   }));
-  const [manualEndDates, setManualEndDates] = ge.useState({ plan: !!existing, actual: !!existing });
+  const [manualEndDates, setManualEndDates] = ge.useState({ plan: existing?.plannedEndMs != null, actual: existing?.actualEndMs != null });
   const [note, setNote] = ge.useState(existing?.note ?? "");
   const [error, setError] = ge.useState(null);
   const [busy, setBusy] = ge.useState(false);
