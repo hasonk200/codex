@@ -4,6 +4,8 @@
 
 [開啟網頁](https://hasonk200.github.io/codex/ontime/)
 
+[設計思路、使用需求與實作說明](ontime/DESIGN.md)：從夜班作息、記錄流程到離線同步、程式結構與後續方向。
+
 ## Firebase Sync
 - 使用 Google 帳戶登入後，個人資料會透過 Firestore 同步到同一帳戶的其他裝置。
 - Firestore 安全規則限定登入者只能讀寫自己 UID 下的資料；雲端紀錄採用不可覆寫的 revisions。
@@ -69,8 +71,8 @@ GitHub Pages 的 App 位於 `ontime/index.html`，根目錄 `index.html` 導向 
 ## 字體與介面
 
 - 七個主要頁面與共用對話框使用 Inter（英文、數字）和 Noto Sans TC（繁體中文），以 400–600 的字重為主，時間數字使用等寬數字排版。
-- 字體放在 `assets/fonts/`，依 Unicode 範圍載入需要的字集，不依賴外部字體服務。兩套字體的 SIL Open Font License 與來源均附在該目錄。
-- `assets/app.css` 保存原有版面結構，`assets/design.css` 統一文字層次、卡片、按鈕、表單、手機導覽與深淺色。主色可選晨光金、霧藍與暖琥珀。
+- 字體放在 `ontime/assets/fonts/`，依 Unicode 範圍載入需要的字集，不依賴外部字體服務。兩套字體的 SIL Open Font License 與來源均附在該目錄。
+- `ontime/assets/app.css` 保存原有版面結構，`ontime/assets/design.css` 統一文字層次、卡片、按鈕、表單、手機導覽與深淺色。主色可選晨光金、霧藍與暖琥珀。
 - 手機統計摘要使用兩欄，月份圖表保持單列並可水平捲動；睡眠、出勤與通勤表單維持可捲動的對話框。
 
 ## 次要表單
@@ -107,7 +109,7 @@ GitHub Pages 的 App 位於 `ontime/index.html`，根目錄 `index.html` 導向 
 
 ## 介面回歸測試
 
-網站仍然直接使用 `index.html`，不需要建置。測試使用獨立資料庫；同步案例以本機 HTTP 服務替代 Firestore 傳輸，不讀寫正式雲端資料。
+網站直接使用 `ontime/index.html`，不需要建置。測試使用獨立資料庫；同步案例以本機 HTTP 服務替代 Firestore 傳輸，不讀寫正式雲端資料。
 
 ```bash
 npm ci
@@ -116,7 +118,7 @@ npm test
 TEST_BROWSER=webkit npm test
 ```
 
-若使用已安裝的 Chromium，可設定 `CHROMIUM_PATH`。測試涵蓋跨日睡眠、午睡、未結束紀錄、日期驗證、夏令時間、舊紀錄保存、出勤與通勤補登、完整搭車流程與 CSV 匯出，以及 320／390／430 像素手機版和桌面排版。設計檢查包含六頁深淺色、字體載入、班表檢視、月份圖表、主色選擇與文字對比度。
+若使用已安裝的 Chromium，可設定 `CHROMIUM_PATH`。測試涵蓋跨日睡眠、午睡、未結束紀錄、日期驗證、夏令時間、舊紀錄保存、出勤與通勤補登、完整搭車流程與 CSV 匯出，以及 320／390／430 像素手機版和桌面排版。設計檢查包含七頁深淺色、字體載入、班表檢視、月份圖表、主色選擇與文字對比度。
 
 補登測試也涵蓋逐項保存、跨日接續、同日多筆選擇、舊版通勤紀錄，以及休息、收入、備註和其他時間的保留。次要表單驗證三餐切換、隱藏工作設定、班次休息保存、跨日用餐和衝突檢查。
 
@@ -132,4 +134,4 @@ Linux WebKit 的 Playwright 離線開關會在 Service Worker 之前拒絕導航
 
 網站頂部按「安裝 App」。Android Chrome 支援瀏覽器安裝對話框；若未顯示，可從 Chrome 選單選「安裝應用程式／新增至主畫面」。iPhone / iPad 請用 Safari 的「分享 → 加入主畫面 → 加入」。聊天 App 內建瀏覽器請先改用 Safari 或 Chrome。安裝完成後從主畫面開啟；安裝入口在獨立 App 模式隱藏。
 
-首次連網開啟會快取公開網頁、安裝腳本、圖示及字體；之後支援離線啟動與本機儲存，已登入帳號恢復網絡後自動同步。iOS 的安裝版可能使用獨立儲存空間；若看不到原紀錄，請登入同一帳號同步。網頁 manifest 使用相對路徑，安裝範圍只限此 App（GitHub Pages 的 `/codex/`）。
+首次連網開啟會快取公開網頁、安裝腳本、圖示及字體；之後支援離線啟動與本機儲存，已登入帳號恢復網絡後自動同步。iOS 的安裝版可能使用獨立儲存空間；若看不到原紀錄，請登入同一帳號同步。網頁 manifest 使用相對路徑，安裝範圍只限此 App（GitHub Pages 的 `/codex/ontime/`）。
