@@ -9,7 +9,8 @@
         "supportEmail": "dickymanho@gmail.com",
         "authorizedRedirectUris": [
           "https://hasonk200.github.io",
-          "https://hasonk200.github.io/codex/"
+          "https://hasonk200.github.io/codex/",
+          "https://hasonk200.github.io/codex/ontime/"
         ]
       }
     }
