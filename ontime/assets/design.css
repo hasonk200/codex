@@ -434,3 +434,62 @@ td { font-size: 14px; padding-block: 16px; font-variant-numeric: tabular-nums; }
   .sleep-studio .sleep-entry { padding:16px; }
   .sleep-week-stats strong { font-size:18px; }
 }
+
+/* Workdays follow the shift's start date; calendar weekdays stay visible. */
+.recording-weekday,.sleep-workday-affiliation small { display:block; font-size:12px; color:var(--dim); margin-top:5px; line-height:1.6; }
+.sleep-selected-day { color:var(--sleep-lilac); font-size:14px; font-weight:500; margin:0; }
+.day-view-toggle { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 18px; }
+.sleep-studio .day-view-toggle { margin:0; }
+.day-view-toggle .button { min-height:44px; min-width:80px; }
+.rest-context { padding:22px; }
+.rest-context-heading { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+.rest-context-heading h2 { font-size:17px; margin:0; }
+.rest-context-heading>span { font-size:12px; color:var(--dim); }
+.rest-continuation { font-size:13px; color:var(--dim); margin:10px 0 18px; }
+.rest-context-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); list-style:none; padding:0; margin:0; gap:18px; }
+.rest-context-steps li { padding:0 0 0 12px; border-left:2px solid var(--line2); min-width:0; display:flex; flex-direction:column; gap:6px; }
+.rest-context-steps small,.rest-context-steps li>span { font-size:12px; color:var(--dim); line-height:1.7; }
+.rest-context-steps strong { font-size:14px; font-weight:500; overflow-wrap:anywhere; }
+.rest-countdown { display:flex; justify-content:space-between; align-items:baseline; gap:14px; border-top:1px solid var(--line); margin-top:20px; padding-top:16px; }
+.rest-countdown>span { font-size:13px; color:var(--dim); }
+.rest-countdown strong { font-size:20px; font-weight:500; font-variant-numeric:tabular-nums; }
+.rest-context-note { font-size:12px; color:var(--dim); margin:8px 0 0; }
+.sleep-shift-reference { font-size:12px; color:var(--dim); border-top:1px solid var(--line); margin:14px 0 0; padding-top:12px; line-height:1.9; }
+.sleep-chart-weekday { font-size:11px; color:var(--dim); }
+.sleep-chart-day { gap:6px; padding-inline:2px; }
+.route-event-day { font-size:10px; color:var(--dim); line-height:1.5; }
+.workday-studio { max-width:1180px; margin:0 auto; }
+.workday-studio .page-head { margin-bottom:0; }
+.workday-hero { border:1px solid #47645e; border-radius:24px; padding:30px; background:#1c3534; color:#f1f7f3; }
+:root[data-theme=light] .workday-hero { background:#eaf3ee; border-color:#cdded4; color:#213a31; }
+.workday-kicker,.workday-budget-label { display:block; font-size:13px; color:#bed6ca; }
+:root[data-theme=light] .workday-kicker,:root[data-theme=light] .workday-budget-label { color:#4d6d5b; }
+.workday-hero h2 { font-size:28px; margin:8px 0 12px; }
+.workday-hero p { font-size:13px; line-height:1.8; }
+.workday-budget-label { margin-top:24px; }
+.workday-budget-number { display:block; font-size:clamp(32px,4vw,48px); font-weight:600; margin-top:6px; font-variant-numeric:tabular-nums; }
+.workday-hero .workday-budget-note { font-size:12px; opacity:.85; margin-bottom:0; }
+.workday-date-group+ .workday-date-group { margin-top:24px; border-top:1px solid var(--line); padding-top:22px; }
+.workday-date-group h3 { font-size:15px; margin:0 0 18px; color:var(--accent-ink); }
+.workday-date-group ol { list-style:none; margin:0; padding:0; }
+.workday-date-group li { display:grid; grid-template-columns:60px minmax(0,1fr); gap:18px; padding:0 0 20px; }
+.workday-date-group time { font-size:15px; font-variant-numeric:tabular-nums; color:var(--dim); }
+.workday-date-group li>div { border-left:2px solid var(--line2); padding-left:16px; display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
+.workday-date-group strong { font-size:15px; font-weight:500; }
+.workday-date-group small { font-size:12px; color:var(--dim); flex-basis:100%; }
+.workday-date-group .badge { font-size:10px; }
+.workday-explanation { font-size:13px; color:var(--dim); }
+@media(max-width:620px) {
+  .rest-context-steps { grid-template-columns:minmax(0,1fr); gap:16px; }
+  .rest-context { padding:20px 18px; }
+  .rest-countdown strong { font-size:18px; }
+  .sleep-entry-times strong { font-size:21px; }
+  .sleep-entry-times>div>span { font-size:11px; }
+  .workday-hero { padding:24px 20px; }
+  .workday-hero h2 { font-size:23px; }
+  .workday-date-group li { grid-template-columns:48px minmax(0,1fr); gap:10px; }
+}
+.workday-date-group strong { overflow-wrap:anywhere; }
+.meal-calendar-date { font-size:13px; color:var(--dim); margin-bottom:5px; }
+.sleep-plan-shortcut { display:grid; gap:8px; justify-items:start; }
+.sleep-plan-shortcut small { color:var(--dim); font-size:12px; line-height:1.7; }

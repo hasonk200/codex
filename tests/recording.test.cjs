@@ -8,12 +8,12 @@ const harness = require('./app-harness.cjs');
 const { randomUUID } = require('node:crypto');
 
 let server, browser, origin;
-const html = harness.instrument(readFileSync(join(__dirname, '../index.html'), 'utf8'));
+const html = harness.instrument(readFileSync(join(__dirname, '../ontime/index.html'), 'utf8'));
 const engine = process.env.TEST_BROWSER || 'chromium';
 
 before(async () => {
   server = createServer(async (request, response) => {
-    const root = resolve(__dirname, '..');
+    const root = resolve(__dirname, '../ontime');
     if (await harness.handle(request, response, root)) return;
     const pathname = new URL(request.url, 'http://localhost').pathname;
     if (pathname === '/manifest.webmanifest') {
@@ -56,19 +56,121 @@ async function openPage(t, viewport = { width: 390, height: 844 }) {
   await page.goto(`${origin}/?fixture=1&scene=planning`);
   await page.getByRole('button', { name: '睡眠', exact: true }).click();
   await page.locator('.sleep-studio').waitFor();
+  await page.getByRole('button',{name:'日曆日',exact:true}).click();
   return page;
 }
 
 async function openSleep(page, date = '2026-11-01', plan = false) {
+  if(await page.getByRole('button',{name:'日曆日',exact:true}).count())await page.getByRole('button',{name:'日曆日',exact:true}).click();
   await page.getByLabel('睡眠日期', { exact: true }).fill(date);
   await page.getByRole('button', { name: plan ? '安排睡眠' : '記錄睡眠', exact: true }).click();
-  return page.getByRole('dialog');
+  const dialog=page.getByRole('dialog');
+  if(plan){await dialog.getByLabel('預計入睡時間',{exact:true}).fill('23:00');await dialog.getByLabel('預計起床時間',{exact:true}).fill('07:00');}
+  return dialog;
 }
 
 async function saveSleep(page, plan = false) {
   await page.getByRole('button', { name: plan ? '儲存睡眠計畫' : '儲存睡眠紀錄', exact: true }).click();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
 }
+
+test('workday model keeps Tuesday recovery sleep with Monday shift and budgets until sleep, including DST', async t => {
+  const page=await openPage(t);
+  const result=await page.evaluate(()=>{
+    const at=value=>Date.parse(value),now=at('2026-10-13T11:00:00-04:00');
+    const session={id:'night',jobId:'a',shiftId:null,timeZone:'America/Toronto',startMs:at('2026-10-12T21:00:00-04:00'),endMs:at('2026-10-13T09:00:00-04:00'),breaks:[],paySnapshotCents:2000};
+    const sleep={id:'recovery',plannedStartMs:at('2026-10-13T12:00:00-04:00'),plannedEndMs:at('2026-10-13T20:00:00-04:00'),actualStartMs:null,actualEndMs:null};
+    const data={settings:{timeZone:'America/Toronto'},jobs:[],sessions:[session],shifts:[],journeys:[],meals:[],sleeps:[sleep]};
+    const before=JSON.stringify(data),value=__ontimeTest.workday(data,'2026-10-12',now);
+    const initial={date:__ontimeTest.workdayForNow(data,now),sleepDate:__ontimeTest.sleepWorkday(sleep,data),untilBed:__ontimeTest.beforeBedBudget(data,value.bed,now),withoutPlan:__ontimeTest.beforeBedBudget({...data,sleeps:[]},null,now),dayLabel:__ontimeTest.dayLabel('2026-10-12'),unchanged:JSON.stringify(data)===before};
+    const actual={...sleep,actualStartMs:at('2026-10-13T12:15:00-04:00'),actualEndMs:at('2026-10-13T20:00:00-04:00')};
+    data.sleeps=[actual];
+    const monday=__ontimeTest.workday(data,'2026-10-12',at('2026-10-13T21:00:00-04:00'));
+    const tuesday=__ontimeTest.workday(data,'2026-10-13',at('2026-10-13T21:00:00-04:00'));
+    const override=__ontimeTest.sleepWorkday({...actual,workdayDate:'2026-10-13'},data);
+    const restDay=__ontimeTest.sleepWorkday({...actual,workdayDate:null},data);
+    const oldData=__ontimeTest.sleepWorkday({...actual,actualStartMs:at('2026-10-17T12:00:00-04:00'),actualEndMs:at('2026-10-17T20:00:00-04:00')},data);
+    const dstWork={...session,startMs:at('2026-10-31T21:00:00-04:00'),endMs:at('2026-11-01T10:00:00-05:00')};
+    const dstSleep={...actual,actualStartMs:at('2026-11-01T11:00:00-05:00'),actualEndMs:at('2026-11-01T19:00:00-05:00')};
+    const dstData={...data,sessions:[dstWork],sleeps:[dstSleep]};
+    return {initial,completed:monday.completed,mondayMs:monday.sleep.actualMs,tuesdayCount:tuesday.sleep.actual.length,override,restDay,oldData,dstDate:__ontimeTest.sleepWorkday(dstSleep,dstData),dstMs:__ontimeTest.workday(dstData,'2026-10-31',at('2026-11-01T20:00:00-05:00')).sleep.actualMs};
+  });
+  assert.deepEqual(result.initial,{date:'2026-10-12',sleepDate:'2026-10-12',untilBed:3600000,withoutPlan:null,dayLabel:'10/12（週一）',unchanged:true});
+  assert.equal(result.completed,true);assert.equal(result.mondayMs,7.75*3600000);assert.equal(result.tuesdayCount,0);
+  assert.equal(result.override,'2026-10-13');assert.equal(result.restDay,'2026-10-13');assert.equal(result.oldData,'2026-10-17');
+  assert.equal(result.dstDate,'2026-10-31');assert.equal(result.dstMs,8*3600000);
+});
+
+async function seedWorkdayScenario(page) {
+  await page.evaluate(async()=>{
+    const repo=new __ontimeTest.Repository('fixture:planning',{localOnly:true});
+    try{
+      const {data}=await repo.loadAppData(),revisions=await repo.getAllRevisions(),jobId=data.jobs[0].id;
+      for(const shift of data.shifts)await repo.saveEntityRevision({entityType:'shift',entityId:shift.id,payload:null,baseParentIds:revisions.filter(value=>value.entityType==='shift'&&value.entityId===shift.id).map(value=>value.revisionId)});
+      const at=value=>Date.parse(value+'-05:00');
+      const work={id:crypto.randomUUID(),jobId,shiftId:null,timeZone:'America/Toronto',startMs:at('2026-11-02T21:00:00'),endMs:at('2026-11-03T09:00:00'),breaks:[],paySnapshotCents:2000,payModeSnapshot:'hourly',actualIncomeCents:null,note:'示範夜班',createdAtMs:1,updatedAtMs:2};
+      const sleep={id:crypto.randomUUID(),plannedStartMs:at('2026-11-03T12:00:00'),plannedEndMs:at('2026-11-03T20:00:00'),actualStartMs:null,actualEndMs:null,timeZone:'America/Toronto',note:'示範恢復睡眠',createdAtMs:1,updatedAtMs:2};
+      for(const [entityType,payload] of [['session',work],['sleep',sleep]])await repo.saveEntityRevision({entityType,entityId:payload.id,payload,baseParentIds:[]});
+    }finally{await repo.close();}
+  });
+  await page.context().addInitScript(()=>{Date.now=()=>Date.parse('2026-11-03T11:00:00-05:00');});
+  await page.reload();
+}
+
+test('workday UI shows Monday shift, Tuesday sleep, exact weekdays and a correctable sleep association', async t => {
+  const page=await openPage(t);await seedWorkdayScenario(page);
+  await page.evaluate(()=>scrollTo(0,document.body.scrollHeight));
+  await page.getByRole('button',{name:'我的時間',exact:true}).click();
+  await page.getByLabel('工作日時間摘要').waitFor();
+  const heading=await page.getByRole('heading',{name:'我的時間',exact:true}).boundingBox();
+  assert.ok(heading.y>=0 && heading.y<844,'switching pages must reveal the workday heading');
+  assert.match(await page.getByLabel('工作日時間摘要').innerText(),/11\/2（週一） 工作日/);
+  assert.match(await page.getByLabel('工作日時間摘要').innerText(),/1 小時/);
+  assert.match(await page.getByLabel('工作日跨日時間線').innerText(),/11\/3（週二）/);
+  await page.getByRole('button',{name:'睡眠',exact:true}).click();
+  await page.getByLabel('睡眠日期',{exact:true}).waitFor();
+  assert.equal(await page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-02');
+  assert.match(await page.locator('.sleep-plan-entry').innerText(),/11\/3（週二） 12:00/);
+  await page.getByRole('button',{name:'安排睡眠',exact:true}).click();
+  assert.equal(await page.getByLabel('預計入睡時間',{exact:true}).inputValue(),'');
+  assert.equal(await page.getByLabel('預計起床時間',{exact:true}).inputValue(),'');
+  await page.getByRole('button',{name:'取消',exact:true}).click();
+  await page.evaluate(()=>{Date.now=()=>Date.parse('2026-11-03T21:00:00-05:00');dispatchEvent(new Event('ontime:recorded'));});
+  await page.getByRole('button',{name:'記錄實際',exact:true}).click();
+  const dialog=page.getByRole('dialog');
+  assert.equal(await dialog.getByLabel('睡眠所屬工作日',{exact:true}).inputValue(),'2026-11-02');
+  assert.equal(await dialog.getByLabel('入睡日期',{exact:true}).inputValue(),'2026-11-03');
+  assert.match(await dialog.locator('.recording-weekday').first().innerText(),/週二/);
+  await dialog.getByLabel('入睡時間',{exact:true}).fill('12:15');await dialog.getByLabel('起床時間',{exact:true}).fill('20:00');
+  await saveSleep(page);
+  assert.equal(await page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-02');
+  assert.match(await page.getByLabel('實際睡眠摘要').innerText(),/7 小時 45 分/);
+  await page.getByRole('button',{name:'今天',exact:true}).click();
+  assert.match(await page.getByLabel('跨日作息接續').innerText(),/實際起床 11\/3（週二） 20:00/);
+  assert.match(await page.getByLabel('跨日作息接續').innerText(),/實際睡眠已完成/);
+  await page.getByRole('button',{name:'睡眠',exact:true}).click();
+  await page.getByRole('button',{name:'日曆日',exact:true}).click();
+  assert.equal(await page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-03');
+  assert.match(await page.locator('.sleep-actual-entry').innerText(),/11\/3（週二）/);
+  await page.locator('.sleep-actual-entry').getByRole('button',{name:'修改',exact:true}).click();
+  await page.getByLabel('睡眠所屬工作日',{exact:true}).fill('2026-11-03');await saveSleep(page);
+  const revisions=await sleepRevisions(page),last=revisions.find(value=>value.payload?.workdayDate==='2026-11-03');
+  assert.equal(last.payload.actualEndMs-last.payload.actualStartMs,7.75*3600000);
+  await page.getByRole('button',{name:'工作日',exact:true}).click();
+  await page.getByLabel('睡眠日期',{exact:true}).fill('2026-11-03');
+  assert.match(await page.getByLabel('實際睡眠摘要').innerText(),/7 小時 45 分/);
+  const serialized=await page.evaluate(revisions=>{
+    const backup=__ontimeTest.exportBackup(revisions);
+    return __ontimeTest.parseBackup(JSON.stringify(backup)).revisions;
+  },revisions);
+  assert.ok(serialized.some(value=>value.payload?.workdayDate==='2026-11-03'));
+  await page.getByRole('button',{name:'安排睡眠',exact:true}).click();
+  await page.getByRole('button',{name:'沿用最近一次睡眠時段',exact:true}).click();
+  assert.equal(await page.getByLabel('預計入睡時間',{exact:true}).inputValue(),'12:15');
+  assert.equal(await page.getByLabel('預計起床時間',{exact:true}).inputValue(),'20:00');
+  await page.getByRole('button',{name:'取消',exact:true}).click();
+  assert.equal((await sleepRevisions(page)).length,revisions.length,'copying an unsaved plan must not create actual sleep');
+});
 
 test('sleep priority: actual times replace the whole plan and an ongoing timer ends at now', async t => {
   const page = await openPage(t);
@@ -117,7 +219,7 @@ test('sleep page is independent and today opens its recording destination', asyn
   assert.match(await page.getByLabel('實際睡眠摘要').innerText(),/尚未記錄/);
   assert.match(await page.locator('.sleep-week-stats').innerText(),/0 \/ 7 天/);
   await page.getByRole('button',{name:'我的時間',exact:true}).click();
-  await page.locator('.time-studio').waitFor();
+  await page.locator('.workday-studio').waitFor();
   assert.equal(await page.getByLabel('睡眠日期',{exact:true}).count(),0);
   assert.equal(await page.getByRole('button',{name:'記錄睡眠',exact:true}).count(),0);
   await page.getByRole('button',{name:'今天',exact:true}).click();
@@ -193,6 +295,7 @@ test('overnight sleep uses tomorrow and persists an eight-hour actual record', a
   assert.equal(revision.payload.note, '半夜醒來一次');
   await page.reload();
   await page.getByRole('button', { name: '睡眠', exact: true }).click();
+  await page.getByRole('button',{name:'日曆日',exact:true}).click();
   await page.getByLabel('睡眠日期', { exact: true }).fill('2026-11-02');
   assert.match(await page.locator('.sleep-list').innerText(), /8 小時/);
 });
@@ -271,6 +374,7 @@ test('DST choices appear only for repeated times and note edits preserve the rec
   }, saved);
   await page.reload();
   await page.getByRole('button', { name: '睡眠', exact: true }).click();
+  await page.getByRole('button',{name:'日曆日',exact:true}).click();
   await page.getByLabel('睡眠日期', { exact: true }).fill('2026-11-01');
   await page.locator('.sleep-entry').getByRole('button', { name: '修改', exact: true }).click();
   assert.equal(await page.getByLabel('入睡重複時刻', { exact: true }).inputValue(), 'later');
@@ -1116,6 +1220,8 @@ test('sleep timer reopens offline across midnight and uploads both actual revisi
   assert.equal((await pendingSnapshot(page,uid)).pending.length,1);
   await page.reload();
   await page.getByRole('button',{name:'睡眠',exact:true}).click();
+  await page.getByRole('button',{name:'日曆日',exact:true}).click();
+  await page.getByLabel('睡眠日期',{exact:true}).fill('2026-11-04');
   assert.equal(await page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-04');
   assert.match(await page.getByLabel('實際睡眠摘要').innerText(),/30 分鐘/);
   await page.getByRole('button',{name:'現在起床',exact:true}).click();
@@ -1127,6 +1233,39 @@ test('sleep timer reopens offline across midnight and uploads both actual revisi
   assert.equal(local.data.sleeps[0].actualEndMs-local.data.sleeps[0].actualStartMs,30*60000);
   await setDisconnected(page,uid,false);
   await waitForPending(page,uid,0);
+  for(const revision of revisions)assert.deepEqual(harness.cloud(uid).get(revision.revisionId),revision);
+});
+
+test('workday association stays Monday through Tuesday sleep, offline reopening and cloud sync', async t => {
+  const {page,uid}=await openSyncPage(t);
+  await page.evaluate(async uid=>{
+    const repo=new __ontimeTest.Repository(uid);
+    try{
+      const {data}=await repo.loadAppData(),jobId=data.jobs[0].id;
+      const at=value=>Date.parse(value+'-05:00');
+      const session={id:crypto.randomUUID(),jobId,shiftId:null,timeZone:'America/Toronto',startMs:at('2026-11-02T21:00:00'),endMs:at('2026-11-03T09:00:00'),breaks:[],paySnapshotCents:2000,payModeSnapshot:'hourly',actualIncomeCents:null,note:'離線工作日測試',createdAtMs:1,updatedAtMs:2};
+      const sleep={id:crypto.randomUUID(),plannedStartMs:at('2026-11-03T12:00:00'),plannedEndMs:at('2026-11-03T20:00:00'),actualStartMs:null,actualEndMs:null,timeZone:'America/Toronto',note:'離線恢復睡眠測試',createdAtMs:1,updatedAtMs:2};
+      for(const [entityType,payload] of [['session',session],['sleep',sleep]])await repo.saveEntityRevision({entityType,entityId:payload.id,payload,baseParentIds:[]});
+    }finally{await repo.close();}
+  },uid);
+  await page.context().addInitScript(()=>{Date.now=()=>Date.parse('2026-11-03T12:00:00-05:00');});
+  await page.reload();await page.getByRole('button',{name:'睡眠',exact:true}).click();
+  await waitForPending(page,uid,0);
+  await setDisconnected(page,uid,true);
+  await page.getByRole('button',{name:'現在入睡',exact:true}).click();
+  await page.getByRole('button',{name:'現在起床',exact:true}).waitFor();
+  assert.equal((await pendingSnapshot(page,uid)).data.sleeps[0].workdayDate,'2026-11-02');
+  await page.reload();await page.getByRole('button',{name:'睡眠',exact:true}).click();
+  await waitForValue(()=>page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-02');
+  await page.evaluate(()=>{Date.now=()=>Date.parse('2026-11-03T20:00:00-05:00');dispatchEvent(new Event('ontime:recorded'));});
+  await page.getByRole('button',{name:'現在起床',exact:true}).click();
+  await page.getByLabel('實際睡眠摘要').getByRole('heading',{name:'8 小時',exact:true}).waitFor();
+  assert.equal(await page.getByLabel('睡眠日期',{exact:true}).inputValue(),'2026-11-02');
+  const local=await pendingSnapshot(page,uid),revisions=local.revisions.filter(value=>value.entityType==='sleep');
+  assert.equal(local.data.sleeps[0].workdayDate,'2026-11-02');
+  assert.equal(local.data.sleeps[0].actualEndMs-local.data.sleeps[0].actualStartMs,8*3600000);
+  assert.equal(local.pending.length,2);
+  await setDisconnected(page,uid,false);await waitForPending(page,uid,0);
   for(const revision of revisions)assert.deepEqual(harness.cloud(uid).get(revision.revisionId),revision);
 });
 
